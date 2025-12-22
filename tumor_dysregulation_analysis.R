@@ -176,6 +176,7 @@ saveRDS(DEA, 'output/compare_report_output.rds')
 pkgs_ver <- sapply(pkgs, function(pkg) as.character(packageVersion(pkg)))
 
 txt <- c(
+  paste0("OS: ", paste(Sys.info()[c("sysname","release","machine")], collapse = " ")),
   paste("R: ", R.version$major, ".", R.version$minor, sep = ""),
   "",
   paste0(pkgs, ": ", pkgs_ver)
