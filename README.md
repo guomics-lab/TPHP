@@ -2,6 +2,9 @@
 
 This repository contains the core analysis code for the TPHP project, which supports large-scale, spatially resolved human proteome profiling. The dataset quantifies >13,000 proteins across 2856 samples spanning 58 major tissue types (251 tissue subtypes) and 25 cancer types using DIA-MS.
 
+The study is described in the preprint:
+**bioRxiv (2025)** — https://www.biorxiv.org/content/10.1101/2025.02.14.638212v1
+
 The code performs per-cancer, per-protein tumor versus paired non-tumor comparisons using linear mixed-effects regression, enabling systematic analysis of oncogenic proteome changes across tissues. Results are exported as RDS objects for downstream statistical analysis, visualization and integration with the public proteome database.
 
 ## Repository layout
@@ -80,12 +83,12 @@ Default input path:
 
 After a successful run, the script writes:
 
-- `output/compare_report_output.rds`  
+- `output/compare_report_output.rds`
 
   An R list `DEA` with:
 
-  - `DEA$Diff.report`: full per-(cancer, protein) model results  
-  - `DEA$Diff.report.filter`: filtered results using `Hedges'g >= 0.5` and `p_adj_BH < 0.05`  
+  - `DEA$Diff.report`: full per-(cancer, protein) model results
+  - `DEA$Diff.report.filter`: filtered results using `Hedges'g >= 0.5` and `p_adj_BH < 0.05`
 
 - `output/package_versions.txt` 
   R version and package versions used.
