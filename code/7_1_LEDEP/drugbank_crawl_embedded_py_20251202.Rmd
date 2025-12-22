@@ -1,0 +1,2240 @@
+---
+title: "drugbank_crawl"
+author: "姜玟昊"
+date: "2022-09-26"
+output: html_document
+---
+last version: 20230602
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+# pacman::p_unload(pacman::p_loaded(), character.only = TRUE)
+# rm(list = ls())
+# gc()
+library(tidyverse)
+library(magrittr)
+library(reticulate)
+# setwd('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/')
+# setwd('N:/code/6_4drug')
+setwd('X:/code/6_4drug')
+# source('../source/source_code.R')
+# source_python('drugbank_crawl_source.py') # source from python
+
+```
+
+
+# 1. Clinical trials of all DEPs
+## 1.1 筛选targets中包含dysregulated proteins的drugs
+```{r}
+# drugbank table
+# df_drug <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/drug/drugbank_results_all_20230207.csv')
+df_drug <- rio::import('input/drugbank_results_all_20230207.csv')
+df_drug1 <- df_drug %>% filter(Biotech == T) # biotech only
+df_drug2 <- df_drug1 %>%
+  select(`DrugBank ID`:Description, `Target uniprot`) %>%
+  mutate(`Target uniprot` = str_replace_all(`Target uniprot`, ' ', '')) %>%
+  separate_rows(`Target uniprot`, sep = ';') %>%
+  filter(`Target uniprot` != '')
+  
+
+# DEA results
+df_dea <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 2)
+meta <- rio::import('../6_3paired_tumor_nontumor/output/T_NT_info_check.xlsx')
+df_dea1 <- df_dea %>%
+  inner_join(meta %>% distinct(cancer, cancer_abbr), .) %>% 
+  filter(abs(g_adj) >= 0.5, p_adj_BH < 0.05)
+
+df_map <- df_dea1 %>%
+  inner_join(df_drug2, by = c('protein' = 'Target uniprot')) %>% 
+  arrange(cancer, Name)
+
+
+```
+
+## 1.2 crawl clinical trials -- all/with results
+```{r}
+df_cancer_drug <- df_map %>% select(cancer, Name) %>% distinct()
+df_cancer_drug %>% rio::export('output/TPHP_cancer_drug_map_20251202.xlsx')
+
+#检查特殊字符
+df_cancer_drug$Name %>% unique %>% str_c(collapse = '') %>% str_replace_all('\\w', '') %>% str_split('') %>% .[[1]] %>% unique() %>% str_c(collapse = '') %>% writeClipboard() # -(,[]) .'
+```
+
+### python crawler
+```{prompt}
+conda activate renv
+
+# install packages required
+# pip install tqdm
+# ...
+
+conda deactivate
+```
+
+```{python}
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun  2 20:22:17 2023
+Edited on Mon Dec 15 11:19:37 2025
+
+@author: Wenhao
+"""
+
+import requests
+import re
+import os
+import time
+import pandas as pd
+from tqdm import tqdm
+
+
+os.chdir('//172.16.13.136/tphp/code/6_4drug')
+df_cancer_drug = pd.read_excel('output/TPHP_cancer_drug_map_20251202.xlsx')
+
+if not os.path.exists('tables_With/'): # output folder
+    os.mkdir('tables_With')
+
+for i, row in tqdm(df_cancer_drug.iterrows()):
+    cancer = row['cancer']
+    # drug = re.sub(r"[-(,\[\]\).']", " ", row["Name"])
+    drug = row['Name'].replace('[', '(').replace(']', ')')
+    # tb = f'https://clinicaltrials.gov/ct2/results/download_fields?down_count=10000&down_flds=all&down_fmt=csv&term={drug}&rslt=With&cond={cancer}&flds=a&flds=b&flds=e&flds=y'
+    tb = f'https://clinicaltrials.gov/api/int/studies/download?format=csv&cond={cancer}&term={drug}&aggFilters=&sort=%40relevance&fields=NCT+Number%2CStudy+Title%2CStudy+URL%2CStudy+Status%2CConditions%2CInterventions%2CSponsor%2CCollaborators%2CStudy+Type%2CAcronym%2CBrief+Summary%2CStudy+Results%2CPrimary+Outcome+Measures%2CSecondary+Outcome+Measures%2COther+Outcome+Measures%2CSex%2CAge%2CPhases%2CEnrollment%2CFunder+Type%2CStudy+Design%2COther+IDs%2CStart+Date%2CPrimary+Completion+Date%2CCompletion+Date%2CFirst+Posted%2CResults+First+Posted%2CLast+Update+Posted%2CLocations%2CStudy+Documents'
+    response = requests.get(tb)
+    while response.status_code != 200:
+        print(f'Error status code of {response.status_code}, sleep 5 sec...')
+        time.sleep(5)
+        response = requests.get(tb)
+    print(response.status_code)
+    content = response.content.decode(response.encoding).encode('utf-8')
+    with open(f'tables_With/{cancer}_{drug}.csv', 'wb') as f:
+        f.write(content)
+```
+
+
+## 1.3 combine tables
+```{r}
+tbls_cli <- list.files('tables_With/', full.names = T)
+
+tbl_ls <- lapply(seq_along(tbls_cli), function(i){
+  cat('Loading table ', i, ' of ', length(tbls_cli), '\n')
+  fname <- tbls_cli[i]
+  cancer <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('.+?_') %>%
+    str_replace('_', '') %>%
+    str_replace('\\+', ' ')
+  drug <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('_.+?\\.csv') %>%
+    str_replace('_', '') %>%
+    str_replace('\\.csv', '')
+  dftmp <- read.csv(fname, check.names = F)
+  dftmp %<>% mutate(
+    cancer = all_of(cancer),
+    drug = all_of(drug)
+  )
+  return(dftmp)
+})
+df_cli <- plyr::ldply(tbl_ls)
+df_cli %<>% select(`NCT Number`:drug)
+df_cli %<>% filter(str_detect(`NCT Number`, '^NCT')) # remove unused rows
+
+df_cli %>% rio::export('output/TPHP_dysregulate_clinical_trials_allResults_20251205.tsv')
+df_cli %>% filter(`Study Results` == 'YES') %>% rio::export('output/TPHP_dysregulate_clinical_trials_WithResults_20251205.tsv')
+
+df_cli %>% pull(`NCT Number`) %>% unique %>% length # 6868
+df_cli %>% filter(`Study Results` == 'YES') %>% pull(`NCT Number`) %>% unique %>% length # 1703; 20230602version: 906
+
+# nutrientional <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/nutrientional_drugbank_results.csv') %>% pull(Name)
+# df_cli %<>% filter(!(drug %in% nutrientional))
+# df_cli %<>% filter(`Study Type` == 'Interventional')
+# df_cli %<>% filter(Phases != 'Not Applicable')
+# df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+# 
+
+df_drug_comb <- df_drug2 %>% rename(`Matched uniprot` = `Target uniprot`) %>% left_join(df_drug1)
+
+df_cli_drug <- df_cli %>% left_join(df_drug_comb, c('drug' = 'Name'))
+length(unique(df_cli_drug$`NCT Number`)) #6868; 20230602version: 3510
+length(unique(df_cli_drug$`Matched uniprot`)) #290; 20230602version: 211
+length(unique(df_cli_drug$drug)) #111; 20230602version: 70
+df_cli_drug %>% rio::export('output/TPHP_DEP290_drug111_clinicalTrial6868_allResults_20251215.tsv')
+
+df_cli_drug2 <- df_cli_drug %>% filter(!str_detect(drug, 'Insulin')) 
+length(unique(df_cli_drug2$`NCT Number`)) #6086; 20230602version: 2089
+length(unique(df_cli_drug2$`Matched uniprot`)) #284; 20230602version: 81
+length(unique(df_cli_drug2$drug)) #108; 20230602version: 40
+
+
+```
+
+## 1.4 crawl clinical trials -- all results
+### python crawler
+```{python}
+# # -*- coding: utf-8 -*-
+# """
+# Created on Fri Jun  2 20:22:17 2023
+# 
+# @author: Wenhao
+# """
+# 
+# import requests
+# import re
+# import os
+# import pandas as pd
+# from tqdm import tqdm
+# 
+# 
+# os.chdir('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank')
+# df_cancer_drug = pd.read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_cancer_drug_map_20230602.xlsx')
+# 
+# if not os.path.exists('tables_all/'): # output folder
+#     os.mkdir('tables_all')
+# 
+# for i, row in tqdm(df_cancer_drug.iterrows()):
+#     cancer = row['cancer']
+#     drug = row['Name']
+#     tb = f'https://clinicaltrials.gov/ct2/results/download_fields?down_count=10000&down_flds=all&down_fmt=csv&term={drug}&rslt=all&cond={cancer}&flds=a&flds=b&flds=e&flds=y'
+#     response = requests.get(tb)
+#     content = response.content.decode(response.encoding).encode('utf-8')
+#     with open(f'tables_all/{cancer}_{drug}.csv', 'wb') as f:
+#         f.write(content)
+
+```
+
+
+## 1.5 combine tables -- all results
+```{r}
+# tbls_cli <- list.files('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/tables_all', full.names = T)
+# 
+# # 1-Azepan-1-Yl-2-Phenyl-2-(4-Thioxo-1,4-Dihydro-Pyrazolo[3,4-D]Pyrimidin-5-Yl)Ethanone Adduct
+# # 语法错误，去掉
+# tbls_cli <- tbls_cli[-1038]
+# 
+# 
+# tbl_ls <- lapply(tbls_cli, function(fname){
+#   cancer <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+#     str_extract('.+?_') %>%
+#     str_replace('_', '') %>%
+#     str_replace('\\+', ' ')
+#   drug <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+#     str_extract('_.+?\\.csv') %>%
+#     str_replace('_', '') %>%
+#     str_replace('\\.csv', '')
+#   dftmp <- read.csv(fname, check.names = F)
+#   dftmp %<>% mutate(
+#     cancer = all_of(cancer),
+#     drug = all_of(drug)
+#   )
+#   return(dftmp)
+# })
+# df_cli <- plyr::ldply(tbl_ls)
+# df_cli %<>% select(`NCT Number`:drug)
+# df_cli %<>% filter(str_detect(`NCT Number`, '^NCT')) # remove unused rows
+# 
+# df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_dysregulate_clinical_trials_allResults_20230602.tsv')
+# 
+# df_cli$`NCT Number` %>% unique %>% length # 3510
+# 
+# # nutrientional <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/nutrientional_drugbank_results.csv') %>% pull(Name)
+# # df_cli %<>% filter(!(drug %in% nutrientional))
+# # df_cli %<>% filter(`Study Type` == 'Interventional')
+# # df_cli %<>% filter(Phases != 'Not Applicable')
+# # df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+# # 
+# 
+# 
+# df_drug_comb <- df_drug2 %>% rename(`Matched uniprot` = `Target uniprot`) %>% left_join(df_drug1)
+# 
+# df_cli_drug <- df_cli %>% left_join(df_drug_comb, c('drug' = 'Name'))
+# length(unique(df_cli_drug$`NCT Number`)) # 3510
+# length(unique(df_cli_drug$`Matched uniprot`)) # 211
+# length(unique(df_cli_drug$drug)) # 70
+# df_cli_drug %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_DEP211_drug70_clinicalTrial3510_allResults_20230602.tsv')
+# 
+
+```
+
+## 1.6 stat
+```{r}
+# df_cli_drug <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_DEP211_drug70_clinicalTrial3510_allResults_20230602.tsv')
+df_cli_drug <- rio::import('output/TPHP_DEP290_drug111_clinicalTrial6868_allResults_20251215.tsv')
+
+df_cli_drug %<>% mutate(`Last Update Posted` = as.character(`Last Update Posted`))
+df_stat <- df_cli_drug %>%
+  select(`NCT Number`, cancer, drug, Phases, contains('Date'), `Study Results`, `Target actions`, `Matched uniprot`, Approved:Withdrawn) %>%
+  distinct()
+
+dates <- df_stat %>% select(`Start Date`:`Last Update Posted`) %>% unlist() %>% unique() %>% sort()
+# # change "December 6, 2019" to "2019-12-06"
+# # This is not required now
+# clinical_change_date <- function(x){
+#   month2num <- sprintf("%02.f", 1:12)
+#   names(month2num) <- month.name
+#   x_split <- str_split(x, ' |, ')
+#   sapply(x_split, function(xx) {
+#     month <- month2num[xx[1]]
+#     if(length(xx) == 2){
+#       year <- xx[2]
+#       ret <- str_c(year, month, sep = '-')
+#     } else if(length(xx) == 3){
+#       day <- sprintf("%02.f", as.numeric(xx[2]))
+#       year <- xx[3]
+#       ret <- str_c(year, month, day, sep = '-')
+#     } else{
+#       ret <- x
+#     }
+#     return(ret)
+#   })
+# }
+# sum(dates != clinical_change_date(dates)) # 0
+# df_stat %<>% mutate_at(which(colnames(.) == 'Start Date'):which(colnames(.) == 'Last Update Posted'), clinical_change_date)
+
+
+df_stat$`Target actions` <- ifelse(df_stat$`Target actions` == '', 'Others', df_stat$`Target actions`)
+
+
+
+
+
+# 以NCT number为中心汇总结果
+df_stat_cli <- plyr::ddply(df_stat, '`NCT Number`', function(dfsub){
+  cancers <- dfsub$cancer %>% unique %>% sort %>% str_c(collapse = '; ')
+  drugs <- dfsub$drug %>% str_split('; ') %>% unlist %>% unique %>% sort %>% str_c(collapse = '; ')
+  uniprots <- dfsub$`Matched uniprot` %>% str_split('; ') %>% unlist %>% unique %>% sort %>% str_c(collapse = '; ')
+  actions <- dfsub$`Target actions` %>% str_split('; ') %>% unlist %>% unique %>% sort %>% str_c(collapse = '; ')
+  status <- dfsub %>% select(Approved:Withdrawn) %>% apply(1, function(x) colnames(dfsub %>% select(Approved:Withdrawn))[x], simplify = F ) %>% unlist %>% unique %>% sort %>% str_c(collapse = '; ')
+  df_ret <- dfsub %>% slice(1) %>% select(-(Approved:Withdrawn))
+  df_ret$cancer <- cancers
+  df_ret$drug <- drugs
+  df_ret$`Matched uniprot` <- uniprots
+  df_ret$`Target actions` <- actions
+  df_ret$`Drug status` <- status
+  return(df_ret)
+})
+
+# rio::export(df_stat_cli, 'output/TPHP_DEP290_drug111_clinicalTrial6868_allResults_stat_20251215.tsv')
+df_stat_cli <- rio::import('output/TPHP_DEP290_drug111_clinicalTrial6868_allResults_stat_20251215.tsv')
+
+df_drug_labeled <- df_cli_drug %>% distinct(`DrugBank ID`, drug, Description, Category, `Target actions`)
+length(unique(df_drug_labeled$drug)) # 111
+rio::export(df_drug_labeled, 'output/drugbank_results_all_20251215_111drugs.xlsx')
+
+# df_drug %>% filter(`DrugBank ID` %in% c('DB00030', 'DB00005', 'DB06584', 'DB11731', 'DB12250', 'DB11840', 'DB05471', 'DB05101', 'DB06474', 'DB12845', 'DB05487', 'DB00089')) %>% rio::export('check1.tsv')
+
+# After drugs munually classify：
+df_drug_labeled_old <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/drug/drugbank_results_all_20230207_70drugs_tg(1).xlsx', sheet = 2)
+df_drug_labeled <- rio::import('output/drugbank_results_all_20251215_111drugs.xlsx')
+
+
+df_drug_labeled %>% count(Type3)
+
+df_stat_cli1 <- df_stat_cli %>% inner_join(df_drug_labeled, by = c('drug' = 'Name'))
+df_stat_cli1 %<>% filter(Phases != 'Not Applicable') # remove Not Applicable. Describes trials without FDA-defined phases, including trials of devices or behavioral interventions.
+df_stat_cli1 %>% count(cancer)
+```
+
+
+### 1.6.2 circos
+
+========================================
+circlize version 0.4.15
+CRAN page: https://cran.r-project.org/package=circlize
+Github page: https://github.com/jokergoo/circlize
+Documentation: https://jokergoo.github.io/circlize_book/book/
+
+If you use it in published research, please cite:
+Gu, Z. circlize implements and enhances circular visualization
+  in R. Bioinformatics 2014.
+
+This message can be suppressed by:
+  suppressPackageStartupMessages(library(circlize))
+========================================
+
+```{r}
+library(circlize)
+df_stat_cli1 %>% count(Type3) # 5; drug types
+df_stat_cli1 %>% count(`Last Update Posted`) # last date
+df_stat_cli1[df_stat_cli1$Phases == 'Phase 1|Phase 2', 'Phases'] <- 'Phase 2'
+df_stat_cli1[df_stat_cli1$Phases == 'Phase 2|Phase 3', 'Phases'] <- 'Phase 3'
+df_stat_cli1[df_stat_cli1$Phases == '', 'Phases'] <- 'NA'
+df_stat_cli1 %<>% filter(!str_detect(drug, 'Insulin')) # 去掉insulin相关
+# df_stat_cli1 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_DEP81_drug40_clinicalTrial2089_allResults_excludingInsulin_stat_20230602.tsv')
+
+
+# 2025.12.04 update
+df_stat_cli1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_DEP81_drug40_clinicalTrial2089_allResults_excludingInsulin_stat_20230602.tsv')
+prot_pattern <- str_c(sort(unique(df_dea1$protein[df_dea1$direction == 'Up'])), collapse = '|')
+df_stat_cli1 %>% filter(!str_detect(`Matched uniprot`, prot_pattern)) %>%
+  select(`NCT Number`, `Last Update Posted`, cancer, `Matched uniprot`, `Target actions`, `Drug status`, Phases, Type3) %>%
+  rio::export('output/TPHP_DEP81_drug40_clinicalTrial2089_excluded_down_regulatioin.tsv')
+df_stat_cli1 %<>% filter(str_detect(`Matched uniprot`, prot_pattern))
+rio::export(df_stat_cli1, 'output/TPHP_DEP77_drug36_clinicalTrial2084_allResults_excludingInsulin_stat_20230602.tsv')
+df_stat_cli1 %>%
+  select(`NCT Number`, `Last Update Posted`, cancer, `Matched uniprot`, `Target actions`, `Drug status`, Phases, Type3) %>%
+  rio::export('output/TPHP_DEP77_drug36_clinicaTrial2084_20230602_for_source_data.tsv')
+
+df_plot <- df_stat_cli1 %>% select(`NCT Number`, `Last Update Posted`, cancer, `Matched uniprot`, `Target actions`, `Drug status`, Phases, Type3)
+
+
+
+# 每圈是一个cancer type --- drug type 的label
+cancer_types <- str_split(df_plot$cancer, '; ') %>% unlist %>% unique %>% sort
+str_split(df_plot$cancer, '; ') %>% unlist %>% table %>% sort %>% rev
+cancer_types_common <- c('Breast carcinoma', 'Ovarian carcinoma', 'Cervical carcinoma', 'Colon carcinoma', 'Hepatocellular carcinoma', 'Rectum carcinoma', 'Pancreas carcinoma', 'Endometrial carcinoma', 'Lung carcinoma')
+df_plot$cancer <- str_replace_all(df_plot$cancer, setdiff(cancer_types, cancer_types_common) %>% str_c(collapse = '|'), 'Other cancers')
+cancer_types <- str_split(df_plot$cancer, '; ') %>% unlist %>% unique %>% sort %>% .[. != 'Other cancers'] %>% c('Other cancers')
+
+drug_types <- table(df_plot$Type3) %>% sort(decreasing = T) %>% names() %>% factor(., levels = ., ordered = T) # 按频次降序排列
+
+# df_plot$cancer %<>% as.factor()
+df_plot$`Last Update Posted` %<>% as.Date()
+df_plot %<>% arrange(`Last Update Posted`, `NCT Number`)
+
+# earliest <- as.numeric(min(df_plot$`Last Update Posted`))
+# latest <- as.numeric(max(df_plot$`Last Update Posted`))
+# dates <- earliest:latest
+
+# circos
+#prepare data
+# df_color <- rio::import('Fig2_circle_scatter_col_xq_20200714.xlsx')
+df_color <- data.frame(
+  cancer_type = cancer_types,
+  col_bg = c('#A079A588', '#E5C8B888', '#416F8888', '#AAAAB588', '#55BC6D88', '#D8894E88', '#ECC66D88', '#E5444488', '#9FB8DE88', '#8080BC88')
+)
+
+cd <- data.frame()
+for(x1 in cancer_types){
+  for(x2 in drug_types){
+    cd %<>% rbind(data.frame(cancer_types = x1, drug_types = x2))
+  }
+}
+cd$drug_types %<>% factor(., levels = levels(drug_types), ordered = T)
+cd$cancer_types %<>% factor(., levels = unique(cd$cancer_types), ordered = T)
+cd %<>% arrange(drug_types, cancer_types)
+
+mat_candrug_NCT <- apply(df_plot, 1, function(x1){
+  apply(cd, 1, function(x2){
+    str_detect(x1['cancer'], x2['cancer_types']) & str_detect(x1['Type3'], x2['drug_types'])
+  })
+})
+colnames(mat_candrug_NCT) <- df_plot$`NCT Number`
+mat_candrug_NCT[mat_candrug_NCT] <- 1
+mat_candrug_NCT[mat_candrug_NCT != 1] <- NA
+df_candrug_NCT <- cbind(cd, mat_candrug_NCT)
+
+# 删掉不包含的cancer-drug组合
+row_remain <- rowSums(mat_candrug_NCT, na.rm = T) != 0
+mat_candrug_NCT <- mat_candrug_NCT[row_remain, ]
+df_candrug_NCT <- df_candrug_NCT[row_remain, ]
+
+# 添加空白分隔行
+last_row <- which(!duplicated(df_candrug_NCT$drug_types)) %>% setdiff(c(1))
+for(i in rev(last_row)){ # 倒序插行
+  df_candrug_NCT <- rbind(df_candrug_NCT[1:(i-1), ],
+                          NA,
+                          NA,
+                          df_candrug_NCT[i:nrow(df_candrug_NCT), ])
+}
+rownames(df_candrug_NCT) <- NULL
+mat_candrug_NCT <- df_candrug_NCT %>% select(-(1:2)) %>% as.matrix()
+
+# df_color$pathway <- drug_types
+
+# Start drawing (should be in console to be export)
+circos.clear()
+circos.par(cell.padding = c(0, 0, 0, 0), 
+           start.degree = 90,
+           gap.degree = 90,
+           gap.after = 90,
+           track.margin = c(0.001,0.001),
+           track.height = 0.014)
+circos.initialize(factors = factor(rep(1,length(df_plot$`NCT Number`))), 
+                  x = 1:length(df_plot$`NCT Number`))
+for(i in 1:nrow(df_candrug_NCT)){
+  circos.trackPlotRegion(
+    ylim = c(0, 2),
+    track.index = i,
+    bg.col = df_color$col_bg[df_color$cancer_type == df_candrug_NCT[i, 'cancer_types']], # 按照cancer types标背景颜色
+    bg.border = NA, 
+    panel.fun = function(x, y) {
+      sector.index = get.cell.meta.data('sector.index')
+      xlim = get.cell.meta.data('xlim')
+      ylim = get.cell.meta.data('ylim')
+    })
+  
+  y_vector <- mat_candrug_NCT[i, ]
+  
+  # y_up = y_vector
+  # y_up[which(y_up < 0)] = NA
+  # 
+  # y_up_pos = y_up
+  # y_up_pos[!is.na(y_up_pos)] = 1
+  # 
+  # y_down = y_vector
+  # y_down[which(y_down > 0)] = NA  
+  # 
+  # y_down_pos = y_down
+  # y_down_pos[!is.na(y_down_pos)] = 1
+  # 
+  # # Up_bg
+  # circos.points(x = 1:length(gene5336),
+  #               y = y_up_pos, 
+  #               track.index = get.cell.meta.data("track.index"),
+  #               col = "black",
+  #               pch = 1,
+  #               cex = abs(y_up)/5)
+  # # Upregulation point
+  # circos.points(track.index = get.cell.meta.data("track.index"),
+  #               x = 1:length(gene5336),
+  #               y = y_up_pos, 
+  #               col = fig2_col$col_up[ceiling(i/10)],
+  #               pch = 20,
+  #               cex = abs(y_up)/5-0.02)
+  # 
+  # # Down_bg
+  # circos.points(track.index = get.cell.meta.data("track.index"),
+  #               x = 1:length(gene5336),
+  #               y = y_down_pos, 
+  #               col = "black",
+  #               pch = 1,
+  #               cex = abs(y_down)/5)
+  # # Downregulation point
+  # circos.points(track.index = get.cell.meta.data("track.index"),
+  #               x = 1:length(gene5336),
+  #               y = y_down_pos, 
+  #               col = fig2_col$col_dw[ceiling(i/10)],
+  #               pch = 20,
+  #               cex = abs(y_down)/5-0.02)  
+  
+  # bg
+  cex_bg <- sapply(df_plot$Phases, function(x) switch(x, 'NA' = 0.3, 'Early Phase 1' = 0.33, 'Phase 1' = 0.33, 'Phase 2' = 0.26, 'Phase 3' = 0.33, 'Phase 4' = 0.4)) * 3
+  # circos.points(x = 1:length(df_plot$`NCT Number`),
+  #               y = y_vector,
+  #               track.index = get.cell.meta.data("track.index"),
+  #               col = "black",
+  #               pch = 1,
+  #               cex = cex_bg)
+  
+  # point
+  pch_point <- sapply(df_plot$Phases, function(x) switch(x, 'NA' = 3, 'Early Phase 1' = 20, 'Phase 1' = 20, 'Phase 2' = 17, 'Phase 3' = 18, 'Phase 4' = 8))
+  col_point <- sapply(df_plot$Phases, function(x) switch(x, 'NA' = '#444444', 'Early Phase 1' = '#222222', 'Phase 1' = '#125789', 'Phase 2' = '#125789', 'Phase 3' = '#D22467', 'Phase 4' = '#D22467'))
+  cex_point <- cex_bg - 0.02
+  
+  # names(col_point) <- names(pch_point) <- names(cex_point) <- names(y_vector)
+  circos.points(track.index = get.cell.meta.data("track.index"),
+                x = 1:length(df_plot$`NCT Number`),
+                y = y_vector, 
+                col = col_point,
+                pch = pch_point,
+                cex = cex_point)
+}
+
+
+
+
+# NCT labels
+NCTs <- df_plot$`NCT Number`
+names(NCTs) <- NCTs
+NCTs_interested <- df_plot %>% filter(Phases == 'Phase 4') %>% pull(`NCT Number`) # Phase 4 trials
+NCTs_mark <- rep(NA, length(NCTs))
+names(NCTs_mark) <- NCTs
+NCTs_mark[NCTs_interested] <- '-'
+NCTs_mark_text <- NCTs_mark
+# NCTs_mark_text[!is.na(NCTs_mark_text)] <- names(NCTs_mark_text[!is.na(NCTs_mark_text)])
+NCTs_mark_text[!is.na(NCTs_mark_text)] <- df_stat_cli1 %>% filter(`NCT Number` %in% NCTs_interested) %>% arrange(`Last Update Posted`) %>% select(drug, cancer, `NCT Number`) %>% apply(1, function(x) str_glue("{x[1]}; {x[2]}; {x[3]}"))
+
+
+#不需要加 “-”，直接修图拉直线
+# circos.trackPlotRegion(factors = factor(rep(1,length(NCTs))),
+#                        track.index = 1,
+#                        panel.fun = function(x, y) {
+#                          circos.text(1:length(NCTs),
+#                                      CELL_META$ylim[1]+3,
+#                                      NCTs_mark,
+#                                      facing = "clockwise",
+#                                      cex = 0.6,
+#                                      niceFacing = TRUE,
+#                                      adj = c(0, 0.5))
+#                        },
+#                        bg.border = NA)
+
+circos.trackPlotRegion(factors = factor(rep(1,length(NCTs))),
+                       track.index = 1,
+                       panel.fun = function(x, y) {
+                         circos.text(1:length(NCTs_mark),
+                                     CELL_META$ylim[1]+7,
+                                     NCTs_mark_text,
+                                     facing = "clockwise",
+                                     cex = 0.6,
+                                     niceFacing = TRUE,
+                                     adj = c(0, 0.5))
+                       },
+                       bg.border = NA)
+
+# drug type labels
+y_drug <- c(5, 17, 26, 34, 42, 49)  # seq(5,nrow(df_candrug_NCT),length(cancer_types))
+for (j in 1:length(drug_types)) {
+  circos.yaxis(side = "left",
+               at = 1,
+               track.index = y_drug[j],
+               labels = drug_types[j],
+               tick = F,
+               sector.index = "1",
+               labels.font = 0.8,
+               col = "white")
+}
+
+#用颜色标注后不再需要文字labels
+# # cancer type labels
+# y_cancer <- 1:nrow(df_candrug_NCT)  # seq(5,nrow(df_candrug_NCT),length(cancer_types))
+# for (j in 1:nrow(df_candrug_NCT)) {
+#   circos.yaxis(side = "right",
+#                at = 1,
+#                track.index = y_cancer[j],
+#                labels = df_candrug_NCT$cancer_types[j],
+#                tick = F,
+#                sector.index = "1",
+#                labels.font = 0.8,
+#                col = "white")
+# }
+
+# NCT date labels
+x_date <- 1:ncol(mat_candrug_NCT)  # seq(5,nrow(df_candrug_NCT),length(cancer_types))
+dates <- df_plot$`Last Update Posted`
+years <- str_extract(dates, '^\\w+\\-') %>% str_replace('-', '')
+min(years) # 2005
+max(years) # 2023
+# year_lbl_i <- which(!duplicated(years))
+# years[year_lbl_i] <- 
+years[duplicated(years)] <- NA
+
+for (i in 1:ncol(mat_candrug_NCT)) {
+  circos.axis(h = "bottom",
+              sector.index = 1,
+              track.index = nrow(mat_candrug_NCT),
+              labels = as.character(years[i]),
+              # tick = F,
+              major.at = x_date[i],direction = "inside",
+              labels.font = 0.8,labels.facing = "reverse.clockwise"
+              #  col = "white"
+  )
+  
+}
+
+
+# add legend
+lgd_links = ComplexHeatmap::Legend(
+  title = 'Cancer name',
+  at = df_color$cancer_type, # labels
+  # col_fun = circlize::colorRamp2(seq_along(df_color$cancer_type), df_color$col_bg), # 连续型图例颜色
+  legend_gp = grid::gpar(fill = df_color$col_bg), # 离散型图例颜色
+  title_position = 'topleft'
+)
+
+ComplexHeatmap::draw(lgd_links, x = unit(1, "npc") - unit(2, "mm"), y = unit(4, "mm"), 
+                     just = c("right", "bottom"))
+
+
+# should save by manual
+# 'TPHP_DEP_drug_clinicalTrial_20230626' # 9x9 size
+'TPHP_DEP_drug_clinicalTrial_20251204' # 9x9 size
+
+# circos.clear()
+
+
+
+
+```
+
+#### 1.7 discussion
+```{r}
+df_stat_cli1 %>% count(Phases)
+# df_stat_cli1 %>% left_join(df_drug_labeled %>% select(Name, Type3) %>% distinct() %>% rename(drug = Name))
+df_stat_cli1 %>% separate_rows(cancer, sep = '; ') %>% count(cancer, Type3) %>% arrange(desc(n))
+
+
+
+X4 <- df_stat_cli1 %>% filter(Phases == 'Phase 4') %>% count(cancer, drug) %>% arrange(desc(n))
+X3 <- df_stat_cli1 %>% filter(Phases == 'Phase 3') %>% count(cancer, drug) %>% arrange(desc(n))
+X3 %>% filter(!(drug %in% X4$drug)) %>% arrange(desc(n))
+
+df_drug_labeled %>% filter(Name == 'Amivantamab')
+
+
+X0 <- df_stat_cli1 %>% filter(!(Phases %in% c('Phase 3', 'Phase 4'))) %>% count(cancer, drug) %>% arrange(desc(n))
+X0 %>% filter(!(drug %in% c(X4$drug, X3$drug))) %>% arrange(desc(n))
+
+# for manuscript
+df_drug %>%
+    separate_rows(`Target uniprot`, sep = ';') %>%
+    filter(`Target uniprot` != '') %>% pull(`DrugBank ID`) %>% unique() %>% length() # 8179
+df_drug %>%
+    separate_rows(`Target uniprot`, sep = ';') %>%
+    filter(`Target uniprot` != '') %>% pull(`Target uniprot`) %>% unique() %>% length() # 6653
+length(unique(df_drug2$`DrugBank ID`)) # 528
+length(unique(df_drug2$`Target uniprot`)) # 573
+
+length(intersect(df_dea$protein, df_drug2$`Target uniprot`)) # 301
+length(intersect(df_drug2$`Target uniprot`, df_dea1$protein)) # 260
+
+
+# length(unique(df_stat_cli1$drug)) # 40
+# length(unique(df_stat_cli1$`NCT Number`)) # 2089
+# length(unique(df_plot$`NCT Number`)) # 2089
+# length(unique(unlist(str_split(df_plot$`Matched uniprot`, '; ')))) # 81
+# length(unique(unlist(str_split(df_plot$cancer, '; ')))) # 10
+
+
+length(unique(unlist(str_split(df_stat_cli1$`Matched uniprot`, '; ')))) # 77
+length(unique(df_stat_cli1$drug)) # 36
+length(unique(df_stat_cli1$`NCT Number`)) # 2084
+
+# We downloaded all DrugBank results (8,179 drugs targeting 6,653 proteins; 2023-02-07) and then restricted the dataset to biotech drugs (528 drugs targeting 573 proteins). Of these targets, 301 were quantified in our paired tumor dysregulation analysis, and 260 were identified as DEPs. And 40 of these drugs with DEP-corresponding cancers matched to clinicalTrial database, corresponding to 81 DEPs in 10 cancer types. 
+
+# We downloaded all DrugBank results (8179 drugs targeting 6653 proteins; 2023-02-07) and then focused on biotech drugs (528 drugs targeting 573 proteins). Among these target proteins, 301 were quantified in our paired tumor dysregulation analysis, and 260 were identified as DEPs. After matching the drugs to ClinicalTrials.gov database by cancer type, 40 drugs had clinical trial records in the corresponding cancers, involving 81 DEPs across 10 cancer types.
+
+```
+
+
+
+# ===================================
+# 1. drugbank, clinical trials
+```{r}
+tbls <- read_excel_allsheets('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_overlapped_target_drugbank_20220926.xlsx')
+db_ids <- lapply(tbls, function(df){
+  if('drug' %in% colnames(df))
+    return(unique(df$drug))
+  if('DrugBank ID' %in% colnames(df))
+    return(unique(df$`DrugBank ID`))
+})
+
+db_id_unique <- unique(unlist(db_ids))
+df_cli_ls <- list()
+for (i in 1:length(db_id_unique)) {
+  print(str_glue('Search drugid {i}/{length(db_id_unique)}'))
+  drug_id <- db_id_unique[i]
+  df_cli_ls[[i]] <- clinical_trial_of_drug(drug_id)
+}
+
+names(df_cli_ls) <- db_id_unique
+for(i in seq_along(df_cli_ls)){
+  if(nrow(df_cli_ls[[i]]) == 0){
+    df_cli_ls[[i]] <- data.frame(
+      `DrugBank ID` = NA,
+      PAHSE = NA,
+      STATUS = NA,
+      PURPOSE = NA,
+      CONDITIONS = NA,
+      CONDITIONS_LINK = NA,
+      COUNT = NA,
+      COUNT_LINK = NA,
+      check.names = F
+    )
+  }
+}
+df_cli_all <- plyr::ldply(df_cli_ls, .id = 'DrugBankID')
+rio::export(df_cli_all, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754.xlsx')
+
+
+
+df_cli_c <- df_cli_all %>%
+  filter(str_detect(str_to_lower(CONDITIONS), 'leukemia|cancer|tumor|[a-z]+oma[^a-z]'))
+df_cli_c$CONDITIONS %<>% str_replace_all('&#39;s', "'s")
+
+df_cli_c <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumoromaleukemia.xlsx')
+
+indice <- str_which(df_cli_c$CONDITIONS, '<a href.+?>.+?;.+?</a>')
+for(i in indice){
+  s <- df_cli_c$CONDITIONS[i]
+  s_replaced_vec <- str_extract_all(s, '<a href.+?>.+?;.+?</a>')[[1]]
+  for(s_from in s_replaced_vec){
+    s_to <- str_match_all(s_from, '>(.+?)</a>')[[1]][1, 2]
+    s_to %<>% gsub(pattern = ';', replacement = '；', ., fixed = T)
+    s %<>% gsub(pattern = s_from, replacement = s_to, ., fixed = T)
+  }
+  
+  df_cli_c[i, 'CONDITIONS'] <- s
+}
+
+rio::export(df_cli_c, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumoromaleukemia.xlsx')
+
+
+```
+
+
+
+## conditions
+```{r}
+df_cli_c <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumoromaleukemia.xlsx')
+
+conditions <- unique(df_cli_c$CONDITIONS) %>%
+  # str_split(';') %>% unlist() %>% unique() %>%
+  sort()
+data.frame(condition = conditions) %>% rio::export('conditions.xlsx')
+
+
+
+df_cli_ct <- df_cli_c %>%
+  filter(str_detect(str_to_lower(CONDITIONS), 'cancer|tumor'))
+
+
+df_cli_ct1 <- df_cli_ct %>%
+  filter(str_detect(CONDITIONS, '[Bb]reast|[Ee]ndometrial')) %>%
+  filter(PURPOSE == 'Treatment') %>%
+  arrange(DrugBankID, PAHSE, STATUS)
+df_cli_ct1 %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial.xlsx')
+
+
+dbid_selected <- sapply(unique(df_cli_ct1$DrugBankID), function(x){
+  dfsub <- df_cli_ct1 %>% filter(DrugBankID == all_of(x))
+  if(any(str_detect(dfsub$CONDITIONS, '[Bb]reast')) & any(str_detect(dfsub$CONDITIONS, '[Ee]ndometrial'))){
+    ;
+  } else{
+    x <- NA
+  }
+  return(x)
+}) %>% .[!is.na(.)]
+
+df_cli_ct2 <- df_cli_ct1 %>% filter(DrugBankID %in% dbid_selected)
+df_cli_ct2 %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_both_20221011.xlsx')
+
+
+df_tbls <- plyr::ldply(tbls, function(df){
+  if('drug' %in% colnames(df))
+    return(df %>% rename(`DrugBank ID` = drug))
+  if('DrugBank ID' %in% colnames(df))
+    return(df)
+}, .id = 'drug_stage')
+
+df_tbls1 <- df_tbls %>%
+  select(`DrugBank ID`, drug_stage, Name, drug_stage, organ, UniprotID, Description, `Target name`, `Target actions`, `Target uniprot`) %>%
+  distinct() %>%
+  filter(drug_stage %in% c('approved', 'illicit', 'investigatioinal', 'experimental', 'chemotherapy')) %>%
+  filter(`DrugBank ID` %in% dbid_selected) %>%
+  rename(DrugBankID = `DrugBank ID`) %>%
+  group_by(DrugBankID) %>%
+  summarise(
+    Name = str_c(sort(unique(Name)), collapse = ';'),
+    drug_status = str_c(sort(unique(drug_stage)), collapse = ';'),
+    organ = str_c(sort(unique(organ)), collapse = ';'),
+    UniprotID = str_c(sort(unique(UniprotID)), collapse = ';'),
+    Description = str_c(sort(unique(Description)), collapse = ';'),
+    `Target name` = str_c(sort(unique(`Target name`)), collapse = ';'),
+    `Target actions` = str_c(sort(unique(`Target actions`)), collapse = ';'),
+    `Target uniprot` = str_c(sort(unique(`Target uniprot`)), collapse = ';')
+  )
+
+df_tbls1 %<>% filter(str_detect(organ, 'mammary'), str_detect(organ, 'uterus')) # mammary uterus overlapped
+
+
+df_cli_ct3 <- inner_join(df_cli_ct2, df_tbls1, by = 'DrugBankID')
+df_cli_ct3 <- df_cli_ct3[, -which(colnames(df_cli_ct3) == 'DrugBank ID')]
+
+# df_cli_ct3 %>%
+#   rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_both_drugstatus_target.xlsx')
+# 
+
+df_cli_ct3 %<>% filter(str_detect(organ, 'mammary'), str_detect(organ, 'uterus')) # select TPHP mammary gland and uterus overlapped
+
+df_cli_ct3 %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_both_drugstatus_target_20221011.xlsx')
+
+
+
+
+
+# drugs targeted only one organ
+dbid_selected <- sapply(unique(df_cli_ct1$DrugBankID), function(x){
+  dfsub <- df_cli_ct1 %>% filter(DrugBankID == all_of(x))
+  if(xor(any(str_detect(dfsub$CONDITIONS, '[Bb]reast')), any(str_detect(dfsub$CONDITIONS, '[Ee]ndometrial')))){ # exclusive OR
+    ;
+  } else{
+    x <- NA
+  }
+  return(x)
+}) %>% .[!is.na(.)]
+
+df_cli_ct2 <- df_cli_ct1 %>% filter(DrugBankID %in% dbid_selected)
+# df_cli_ct2 %>%
+#   rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_both_20221011.xlsx')
+
+
+df_tbls <- plyr::ldply(tbls, function(df){
+  if('drug' %in% colnames(df))
+    return(df %>% rename(`DrugBank ID` = drug))
+  if('DrugBank ID' %in% colnames(df))
+    return(df)
+}, .id = 'drug_stage')
+
+df_tbls1 <- df_tbls %>%
+  select(`DrugBank ID`, drug_stage, Name, drug_stage, organ, UniprotID, Description, `Target name`, `Target actions`, `Target uniprot`) %>%
+  distinct() %>%
+  filter(drug_stage %in% c('approved', 'illicit', 'investigatioinal', 'experimental', 'chemotherapy')) %>%
+  filter(`DrugBank ID` %in% dbid_selected) %>%
+  rename(DrugBankID = `DrugBank ID`) %>%
+  group_by(DrugBankID) %>%
+  summarise(
+    Name = str_c(sort(unique(Name)), collapse = ';'),
+    drug_status = str_c(sort(unique(drug_stage)), collapse = ';'),
+    organ = str_c(sort(unique(organ)), collapse = ';'),
+    UniprotID = str_c(sort(unique(UniprotID)), collapse = ';'),
+    Description = str_c(sort(unique(Description)), collapse = ';'),
+    `Target name` = str_c(sort(unique(`Target name`)), collapse = ';'),
+    `Target actions` = str_c(sort(unique(`Target actions`)), collapse = ';'),
+    `Target uniprot` = str_c(sort(unique(`Target uniprot`)), collapse = ';')
+  )
+
+df_tbls1 %<>% filter(str_detect(organ, 'mammary'), str_detect(organ, 'uterus')) # mammary uterus overlapped
+
+
+df_cli_ct3 <- inner_join(df_cli_ct2, df_tbls1, by = 'DrugBankID')
+df_cli_ct3 <- df_cli_ct3[, -which(colnames(df_cli_ct3) == 'DrugBank ID')]
+
+# df_cli_ct3 %>%
+#   rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_both_drugstatus_target.xlsx')
+# 
+
+df_cli_ct3 %<>% filter(str_detect(organ, 'mammary'), str_detect(organ, 'uterus')) # select TPHP mammary gland and uterus overlapped
+
+df_cli_ct3 %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_one_drugstatus_target_20221011.xlsx')
+
+
+```
+
+
+## breast cancer and endometrial cancer
+```{r}
+df_cli_2 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_both_drugstatus_target_20221011.xlsx')
+df_cli_1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_one_drugstatus_target_20221011.xlsx')
+
+
+
+```
+
+
+### crawl clinical trials
+```{python}
+import requests
+import re
+import os
+import pandas as pd
+from tqdm import tqdm
+
+
+# main
+df_cli_1 = pd.read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_one_drugstatus_target_20221011.xlsx')
+df_cli_2 = pd.read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_only_both_drugstatus_target_20221011.xlsx')
+
+
+drugs = sorted(list(set(df_cli_1['Name']) | set(df_cli_2['Name'])))
+cancers = ['Endometrial+Cancer', 'Breast+Cancer']
+if not os.path.exists('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/tables/'): # output folder
+    os.mkdir('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/tables')
+for cancer in cancers:
+    for drug in tqdm(drugs):
+        # url = f'https://clinicaltrials.gov/ct2/results?type=&rslt=With&cond={cancer}&term={drug}'
+        tb = f'https://clinicaltrials.gov/ct2/results/download_fields?down_count=10000&down_flds=all&down_fmt=csv&term={drug}&rslt=With&cond={cancer}&flds=a&flds=b&flds=e&flds=y'
+        response = requests.get(tb)
+        content = response.content.decode(response.encoding).encode('utf-8')
+        with open(f'//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/tables/{cancer}_{drug}.csv', 'wb') as f:
+            f.write(content)
+
+
+```
+
+
+
+### combine tables
+```{r}
+tbls_cli <- list.files('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/tables', full.names = T)
+tbl_ls <- lapply(tbls_cli, function(fname){
+  cancer <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('.+?_') %>%
+    str_replace('_', '') %>%
+    str_replace('\\+', ' ')
+  drug <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('_.+?\\.csv') %>%
+    str_replace('_', '') %>%
+    str_replace('\\.csv', '')
+  dftmp <- read.csv(fname, check.names = F)
+  dftmp %<>% mutate(
+    cancer = all_of(cancer),
+    drug = all_of(drug)
+  )
+  return(dftmp)
+})
+df_cli <- plyr::ldply(tbl_ls)
+df_cli %<>% select(`NCT Number`:drug)
+df_cli %<>% filter(str_detect(`NCT Number`, '^NCT')) # remove unused rows
+# df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult.csv')
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult.tsv')
+df_cli <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult.tsv')
+
+nutrientional <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/nutrientional_drugbank_results.csv') %>% pull(Name)
+df_cli %<>% filter(!(drug %in% nutrientional))
+df_cli %<>% filter(`Study Type` == 'Interventional')
+df_cli %<>% filter(Phases != 'Not Applicable')
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+
+
+```
+
+
+
+### stat: protein, drug, phase, cancer
+```{r}
+df_cli_simple <- df_cli %>% select(drug, cancer, Conditions, Phases) %>% distinct()
+df_drug_prot <- rbind(df_cli_1, df_cli_2) %>%
+  select(Name, organ, UniprotID) %>%
+  distinct()
+
+df_cli_simple %<>% inner_join(df_drug_prot, by = c('drug' = 'Name'))
+df_cli_simple %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_simple.tsv')
+
+df_cli_simple1 <- df_cli_simple %>% select(UniprotID, drug, Phases, cancer) %>%
+  separate_rows(UniprotID) %>%
+  distinct() %>%
+  arrange(UniprotID, drug, Phases, cancer)
+df_cli_simple1 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_355proteins_119drugs.xlsx')
+
+```
+
+### search drug
+```{r}
+# df_cli_simple1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_355proteins_119drugs.xlsx')
+# drugs <- unique(df_cli_simple1$drug)
+# df_drug_ls <- list()
+# for (i in 1:length(drugs)) {
+#   print(str_glue('Search drug {drugs[i]}    {i}/{length(drugs)}'))
+#   drug_name <- drugs[i]
+#   df_drug_ls[[i]] <- drugbank_search_name(drug_name)
+# }
+# df_drug <- plyr::ldply(df_drug_ls)
+# df_drug %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugs119_information.xlsx')
+
+
+# filter manually
+df_cli1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+df_drug <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugs119_information.xlsx')
+
+drug_used <- df_drug %>% filter(Removed == 'F') %>% pull(GenericName) %>% unique()
+df_cli2 <- df_cli1 %>% filter(drug %in% drug_used)
+df_cli2 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug.tsv')
+
+
+
+df_cli2$`NCT Number` %>% unique() %>% length() # 748
+df_cli2 %>% select(-drug, -cancer) %>% distinct() %>% nrow() # 748
+# NCT_tmps <- df_cli2 %>% select(-drug, -cancer) %>% distinct() %>% count(`NCT Number`) %>% filter(n > 1) %>% pull(`NCT Number`)
+# df_cli2 %>% filter(`NCT Number` %in% NCT_tmps) %>% arrange(`NCT Number`) %>% View()
+# NCT_multidrug <- df_cli2 %>% count(`NCT Number`) %>% filter(n > 1) %>% pull(`NCT Number`)
+# df_cli2 %>% filter(`NCT Number` %in% NCT_multidrug) %>% arrange(`NCT Number`)
+
+colnames(df_cli2)[1] <- 'NCTNumber'
+df_cli3 <- plyr::ddply(df_cli2, .variables = 'NCTNumber', function(dfsub){
+  dfret <- dfsub %>% select(-drug, -cancer) %>% distinct()
+  dfret$cancer <- dfsub$cancer %>% unique() %>% sort() %>% str_c(collapse = ';')
+  dfret$drug <- dfsub$drug %>% unique() %>% sort() %>% str_c(collapse = ';')
+  return(dfret)
+})
+colnames(df_cli3)[1] <- colnames(df_cli2)[1] <- 'NCT Number'
+df_cli3 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials.tsv')
+df_cli3$`NCT Number` %>% unique() %>% length() # 748
+
+df_cli3_simple <- df_cli3 %>%
+  select(`NCT Number`, Title, Status, Conditions, Phases, cancer, drug) %>%
+  arrange(Phases, cancer)
+
+df_cli3_simple %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/748trials_simple.xlsx')
+
+
+df_cli3_simple %>% count(cancer, Phases)
+df_cli3_simple %>% filter(!str_detect(df_cli3_simple$drug, ';')) %>%
+  count(drug, Phases)
+
+```
+
+
+### drugs分类 (根据targets分类)
+```{r}
+df_cli_simple1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_355proteins_119drugs.xlsx')
+
+df_cli3 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials.tsv')
+
+
+df_drug_prot <- df_cli_simple1 %>% distinct(UniprotID, drug) # UniprotID, drug
+
+# immunotherapy targets
+df_immu <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugbank_result_immune_therapy_combined_edited2_reviewed_v2_sheet4_20221026.xlsx') %>% select(DRUG, TARGET)
+targets_immu <- unique(df_immu$TARGET) %>% .[!is.na(.)]
+
+
+# rtk targets
+df_rtk <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/RTKs.xlsx')
+uniprots_rtk <- unique(df_rtk$From) %>% .[!is.na(.)]
+
+
+# 癌症激素治療
+df_horm1 <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugbank_results_hormoral.xlsx', sheet = 'drugbank_results_hormoral')
+df_horm2 <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugbank_results_hormoral.xlsx', sheet = 'Catogarized targets')
+uniprots_horm1 <- unique(df_horm1$`Target uniprot`) %>%
+  .[!is.na(.)] %>%
+  str_split(';') %>%
+  unlist() %>%
+  unique()
+targets_horm2 <- unique(df_horm2$Target) %>% .[!is.na(.)]
+
+
+
+
+targets <- union(targets_immu, targets_horm2)
+# uniprots <- c()
+# for(i in seq_along(targets)){
+#   print(str_glue('Search target {i}/{length(targets)}'))
+#   # uniprots[i] <- drugbank_search_protname(targets[i])
+#   uniprots[i] <- protname_to_uniprotid(targets[i])
+# }
+# df_target_uniprot <- data.frame(target = targets, uniprotid = uniprots)
+# df_target_uniprot %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/243immn_horm_targets_uniprot.xlsx')
+df_target_uniprot <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/243immn_horm_targets_uniprot_edited.xlsx')
+df_target_uniprot_sep <- df_target_uniprot %>% separate_rows('uniprotid', sep = ';') %>%
+  filter(uniprotid != '-')
+ht_target_uniprot <- df_target_uniprot_sep$uniprotid
+names(ht_target_uniprot) <- df_target_uniprot_sep$target
+
+
+df1 <- data.frame(target = targets_immu, uniprotid = ht_target_uniprot[targets_immu] %>% unname(), immuno = T, rtk = NA, hormoral = NA)
+df2 <- data.frame(target = NA, uniprotid = uniprots_rtk, immuno = NA, rtk = T, hormoral = NA)
+df3 <- data.frame(target = NA, uniprotid = uniprots_horm1, immuno = NA, rtk = NA, hormoral = T)
+df4 <- data.frame(target = targets_horm2, uniprotid = ht_target_uniprot[targets_horm2] %>% unname(), immuno = NA, rtk = NA, hormoral = T)
+
+# Reduce(function(x, y){
+#   full_join(x, y, by = 'uniprotid')
+# }, list(df1, df2, df3, df4))
+Reduce(intersect, list(df1$uniprotid, df2$uniprotid, df3$uniprotid, df4$uniprotid))
+df <- rbind(df1, df2, df3, df4)
+df[!is.na(df$immuno), 'immuno'] <- 'immuno'
+df[!is.na(df$rtk), 'rtk'] <- 'rtk'
+df[!is.na(df$hormoral), 'hormoral'] <- 'hormoral'
+length(unique(df$uniprotid)) # 3776
+df$uniprotid %<>% str_trim()
+length(unique(df$uniprotid)) # 3109
+
+df_target <- df %>% drop_na(uniprotid) %>%
+  filter(uniprotid != '-') %>%
+  filter(uniprotid != '') %>%
+  pivot_longer(cols = c('immuno', 'rtk', 'hormoral')) %>%
+  drop_na(value) %>%
+  select(-name) %>%
+  distinct() %>%
+  pivot_wider(id_cols = c('target', 'uniprotid'), names_from = value)
+
+df_target %<>%
+  mutate(
+    immuno = ifelse(!is.na(immuno), T, F),
+    rtk = ifelse(!is.na(rtk), T, F),
+    hormoral = ifelse(!is.na(hormoral), T, F)
+  )
+df_target %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drug_target_classification.xlsx')
+
+length(unique(df_target$uniprotid)) # 3107
+
+
+
+uniprotid_dup <- df_target$uniprotid %>% .[duplicated(.)]
+df_target_dup <- df_target %>%
+  filter(uniprotid %in% uniprotid_dup) %>%
+  arrange(uniprotid, target)
+rio::export(df_target_dup, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drug_target_classification_dup444.xlsx')
+
+df_target_dup %>%
+  count(uniprotid) %>%
+  filter(n > 2)
+
+df_target_dup_combine <- df_target_dup %>%
+  plyr::ddply('uniprotid', function(dfsub){
+    dfret <- dfsub[1, ]
+    dfret$target <- dfsub$target %>% unique() %>% .[!is.na(.)] %>% str_c(collapse = ';')
+    dfret$immuno <- any(dfsub$immuno)
+    dfret$rtk <- any(dfsub$rtk)
+    dfret$hormoral <- any(dfsub$hormoral)
+    return(dfret)
+  })
+
+df_target_rlt <- df_target %>%
+  filter(!(uniprotid %in% uniprotid_dup)) %>%
+  rbind(df_target_dup_combine)
+  arrange(uniprotid)
+rio::export(df_target_rlt, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drug_target_classification_3107uniqueUniprotID.xlsx')
+
+
+
+df_cli_simple1_ <- df_cli_simple1 %>%
+  left_join(df_target_rlt, by = c('UniprotID' = 'uniprotid'))
+
+rio::export(df_cli_simple1_, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/clinical_trials_target_classification.xlsx')
+
+# df_cli3 %>% left_join(df_cli_simple1_, by = 'drug')
+df_cli_simple1_$drug %>% setdiff(unlist(str_split(df_cli3$drug, ';')))
+df_cli_simple1_$drug %>% setdiff(unlist(str_split(df_cli3$drug, ';')), .) # character(0)
+
+df_target_uniprot_drug <- df_target_rlt %>%
+  left_join(df_cli_simple1, by = c('uniprotid' = 'UniprotID')) %>%
+  select(-Phases, -cancer) %>%
+  distinct()
+rio::export(df_target_uniprot_drug, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/target_uniprotid_drug.xlsx')
+
+drug_types_of_trial <- lapply(df_cli3$drug, function(drugs){
+  drugs %<>% str_split(';') %>% unlist()
+  ret <- df_target_uniprot_drug %>%
+    filter(drug %in% drugs) %>%
+    summarise_at(vars(immuno, rtk, hormoral), sum) %>%
+    mutate_all(function(x) ifelse(x > 0, T, F)) %>%
+    mutate(others = ifelse(length(setdiff(drugs, df_target_uniprot_drug$drug)) > 0, T, F))
+  return(ret)
+})
+df_drug_label <- Reduce(rbind, drug_types_of_trial) %>%
+  add_column(drug = df_cli3$drug, .before = 1)
+df_drug_label %>% select(-drug) %>%
+  cbind(df_cli3, .)
+
+df_cli <- df_drug_label %>% select(-drug) %>%
+    cbind(df_cli3, .)
+
+df_cli %>% count(immuno)
+df_cli %>% count(rtk)
+df_cli %>% count(hormoral)
+
+df_drug_types <- df_cli %>% select(`NCT Number`, drug:others) %>%
+  mutate(
+    immuno = ifelse(immuno, 'immuno', NA),
+    rtk = ifelse(rtk, 'rtk', NA),
+    hormoral = ifelse(hormoral, 'hormoral', NA),
+    others = ifelse(others, 'others', NA)
+  ) %>%
+  pivot_longer(immuno:others, names_to = NULL, values_to = 'type', values_drop_na = T) %>%
+  rename(NCTNumber = `NCT Number`) %>%
+  plyr::ddply('NCTNumber', function(dfsub){
+    types <- dfsub$type %>% unique() %>% sort() %>% str_c(collapse = ';')
+    dfsub %>% slice(1) %>% mutate(type = all_of(types))
+  })
+  
+df_drug_types %>% count(type)
+df_drug_types %>%
+  plyr::dlply('type', function(dfsub){
+    dfsub$drug %>% unique() %>% sort()
+  })
+df_cli$drugtype <- df_drug_types$type
+
+
+
+df_drug_prot_wide <- plyr::ddply(df_drug_prot, 'drug', function(dfsub){
+  dfret <- dfsub %>% slice(1)
+  dfret$UniprotID <- dfsub$UniprotID %>% unique() %>% sort() %>% str_c(collapse = ';')
+  return(dfret)
+})
+
+ht_drug2prot <- df_drug_prot$UniprotID
+names(ht_drug2prot) <- df_drug_prot$drug
+
+df_cli$target <- sapply(df_cli$drug, function(e){
+  drugs <- str_split(e, ';')[[1]]
+  ht_drug2prot[drugs] %>%
+    str_split(';') %>%
+    unlist() %>%
+    unique() %>%
+    sort() %>%
+    str_c(collapse = ';')
+})
+
+
+
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_drugType.tsv')
+
+
+
+df_cli_1_2 <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TPHP_carcinoma_upregulated_proteins_drugbank_clinical_trials_3754_cancertumor_breastEndometrial_combBothOne_20221110.xlsx')
+df_cli_1_2_simple <- df_cli_1_2 %>% select(Name, Description, `Target name`, `Target actions`, `Target uniprot`)
+intersect(colnames(df_cli_1_2_simple), colnames(df_cli)) # character(0)
+df_cli_1_2_simple %<>%
+  rename(drug = Name,
+         DrugDescription = Description) %>%
+  distinct()
+
+ht_drug2target <- df_cli_1_2_simple$`Target uniprot`
+names(ht_drug2target) <- df_cli_1_2_simple$drug
+
+df_cli$`Target uniprot` <- sapply(df_cli$drug, function(e){
+  drugs <- str_split(e, ';')[[1]]
+  ht_drug2target[drugs] %>%
+    str_split(';') %>%
+    unlist() %>%
+    unique() %>%
+    str_trim() %>%
+    .[. != ''] %>%
+    sort() %>%
+    str_c(collapse = ';')
+})
+df_cli
+which(df_cli$target == df_cli$`Target uniprot`)
+
+
+
+df_horm1 <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/drugbank_results_hormoral.xlsx', sheet = 'drugbank_results_hormoral')
+df_horm1_bio <- df_horm1 %>% filter(Biotech, !`Small molecule`, !Nutraceutical)
+
+
+horm1_bio <- df_horm1_bio$Name
+df_cli$IsBiotech <- sapply(df_cli$drug, function(e){
+  str_split(e, ';')[[1]] %>%
+    intersect(horm1_bio) %>%
+    unique() %>% sort() %>% str_c(collapse = ';')
+}) %>% unname()
+df_cli$IsBiotech %>% .[. != ''] %>%
+  str_split(';') %>%
+  unlist() %>%
+  table()
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_drugTypeTarget.tsv')
+
+drugs <- df_cli$IsBiotech %>% .[. != ''] %>%
+  str_split(';') %>%
+  unlist() %>%
+  unique() %>% sort()
+
+df_biodrug <- df_cli_1_2 %>% filter(Name %in% drugs) %>% select(Name, UniprotID:`Target uniprot`) %>% distinct()
+df_biodrug %>%
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_BiotechDrugs.xlsx')
+
+
+# df_cli_simple <- df_cli %>% select(`NCT Number`, Title, Status, Conditions, Interventions, Phases, `Start Date`:`Last Update Posted`, cancer:target)
+# df_cli_simple %>% 
+#   rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_drugType_simple.tsv')
+
+
+df_cli_simple <- df_cli %>% select(`NCT Number`, Title, Status, Conditions, Interventions, Phases, `Start Date`:`Last Update Posted`, cancer:IsBiotech)
+df_cli_simple %>% 
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_BiotechDrugs_simple.tsv')
+
+
+
+df_cli_simple %>% count(Phases, drugtype) %>%
+  pivot_wider(Phases, names_from = drugtype, values_from = n)
+
+
+df_drug_label %>% filter(others) %>% pull(drug)
+# 'Ceralasertib;MK-1775;Olaparib'
+df_target_uniprot_drug %>% filter(drug %in% c('Ceralasertib', 'MK-1775', 'Olaparib')) %>% pull(drug) %>% unique()
+# without Ceralasertib
+
+
+
+# clinicals with targets among hormoral, immuno and rtk
+df_hir <- df_cli_simple %>%
+  filter(drugtype == 'hormoral;immuno;rtk')
+
+df_hir %>% 
+  rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional_antitumorDrug_748trials_drugType_simple_hormoral-immuno-rtk.tsv')
+
+df_hir %>% count(Phases, cancer) %>% pivot_wider(Phases, names_from = cancer, values_from = n)
+
+
+
+# different targets between endometrial and breast cancers among hormoral, immuno and rtk
+prot_hir_bre <- df_hir %>% 
+  filter(cancer == 'Breast Cancer') %>%
+  pull(target) %>%
+  str_split(';') %>%
+  unlist() %>% unique()
+
+prot_hir_end <- df_hir %>% 
+  filter(cancer == 'Endometrial Cancer') %>%
+  pull(target) %>%
+  str_split(';') %>%
+  unlist() %>% unique()
+
+setdiff(prot_hir_bre, prot_hir_end)
+setdiff(prot_hir_end, prot_hir_bre)
+
+
+
+# different targets between endometrial and breast cancers
+drug_bre <- df_cli %>% 
+  filter(cancer == 'Breast Cancer') %>%
+  pull(drug) %>%
+  str_split(';') %>%
+  unlist() %>% unique()
+
+drug_end <- df_cli %>% 
+  filter(cancer == 'Endometrial Cancer') %>%
+  pull(drug) %>%
+  str_split(';') %>%
+  unlist() %>% unique()
+
+setdiff(drug_bre, drug_end) %>% sort()
+setdiff(drug_end, drug_bre) %>% sort()
+intersect(drug_bre, drug_end) %>% sort()
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+## pancreas cancer
+### read drug pairs
+```{r}
+df_drug_pair <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/Final_pancreas_list_v2.xlsx', sheet = 'drug_combination')
+drugs <- apply(df_drug_pair, 1, function(row){
+  row %>% sort() %>% str_c(collapse = '&')
+}) %>% unique()
+
+```
+
+
+### crawl clinical trials
+```{python}
+import requests
+import re
+import os
+import pandas as pd
+from tqdm import tqdm
+
+
+drugs = r.drugs
+cancers = ['Pancreas+Cancer']
+
+rlt_dir = '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/tables/'
+if not os.path.exists(rlt_dir): # output folder
+    os.mkdir(rlt_dir)
+for cancer in cancers:
+    for drug in tqdm(drugs):
+        # url = f'https://clinicaltrials.gov/ct2/results?type=&rslt=With&cond={cancer}&term={drug}'
+        tb = f'https://clinicaltrials.gov/ct2/results/download_fields?down_count=10000&down_flds=all&down_fmt=csv&term={drug}&rslt=With&cond={cancer}&flds=a&flds=b&flds=e&flds=y'
+        response = requests.get(tb)
+        content = response.content.decode(response.encoding).encode('utf-8')
+        with open(f'{rlt_dir}/{cancer}_{drug}.csv', 'wb') as f:
+            f.write(content)
+
+
+```
+
+
+
+### combine tables
+```{r}
+tbls_cli <- list.files('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/tables/', full.names = T)
+tbl_ls <- lapply(tbls_cli, function(fname){
+  cancer <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('.+?_') %>%
+    str_replace('_', '') %>%
+    str_replace('\\+', ' ')
+  drug <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('_.+?\\.csv') %>%
+    str_replace('_', '') %>%
+    str_replace('\\.csv', '')
+  dftmp <- read.csv(fname, check.names = F)
+  dftmp %<>% mutate(
+    cancer = all_of(cancer),
+    drug = all_of(drug)
+  )
+  return(dftmp)
+})
+df_cli <- plyr::ldply(tbl_ls)
+df_cli %<>% select(`NCT Number`:drug)
+df_cli %<>% filter(str_detect(`NCT Number`, '^NCT')) # remove unused rows
+
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/TPHP_pancreas_cancer_combinedDrugs_clinical_trials_hasResult.tsv')
+df_cli <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/TPHP_pancreas_cancer_combinedDrugs_clinical_trials_hasResult.tsv')
+df_cli$`NCT Number` %>% unique %>% length # 25
+
+# nutrientional <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/nutrientional_drugbank_results.csv') %>% pull(Name)
+# df_cli %<>% filter(!(drug %in% nutrientional))
+# df_cli %<>% filter(`Study Type` == 'Interventional')
+# df_cli %<>% filter(Phases != 'Not Applicable')
+# df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+# 
+
+```
+
+
+## pancreas cancer with has no results
+### read drug pairs
+```{r}
+df_drug_pair <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/Final_pancreas_list_v2.xlsx', sheet = 'drug_combination')
+drugs <- apply(df_drug_pair, 1, function(row){
+  row %>% sort() %>% str_c(collapse = '&')
+}) %>% unique()
+
+```
+
+### crawl clinical trials
+```{python}
+import requests
+import re
+import os
+import pandas as pd
+from tqdm import tqdm
+
+
+drugs = r.drugs
+cancers = ['Pancreas+Cancer']
+
+rlt_dir = '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/tables_WithOrWithout_results/'
+if not os.path.exists(rlt_dir): # output folder
+    os.mkdir(rlt_dir)
+for cancer in cancers:
+    for drug in tqdm(drugs):
+        # url = f'https://clinicaltrials.gov/ct2/results?type=&rslt=With&cond={cancer}&term={drug}'
+        tb = f'https://clinicaltrials.gov/ct2/results/download_fields?down_count=10000&down_flds=all&down_fmt=csv&term={drug}&cond={cancer}&flds=a&flds=b&flds=e&flds=y'
+        response = requests.get(tb)
+        content = response.content.decode(response.encoding).encode('utf-8')
+        with open(f'{rlt_dir}/{cancer}_{drug}.csv', 'wb') as f:
+            f.write(content)
+
+
+```
+
+
+
+### combine tables
+```{r}
+tbls_cli <- list.files('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/tables_WithOrWithout_results/', full.names = T)
+tbl_ls <- lapply(tbls_cli, function(fname){
+  cancer <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('.+?_') %>%
+    str_replace('_', '') %>%
+    str_replace('\\+', ' ')
+  drug <- fname %>% str_split('/') %>% unlist() %>% tail(1) %>%
+    str_extract('_.+?\\.csv') %>%
+    str_replace('_', '') %>%
+    str_replace('\\.csv', '')
+  dftmp <- read.csv(fname, check.names = F)
+  dftmp %<>% mutate(
+    cancer = all_of(cancer),
+    drug = all_of(drug)
+  )
+  return(dftmp)
+})
+df_cli <- plyr::ldply(tbl_ls)
+df_cli %<>% select(`NCT Number`:drug)
+df_cli %<>% filter(str_detect(`NCT Number`, '^NCT')) # remove unused rows
+
+df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/TPHP_pancreas_cancer_combinedDrugs_clinical_trials_WithOrWithout_results.tsv')
+df_cli <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/pancreas/TPHP_pancreas_cancer_combinedDrugs_clinical_trials_WithOrWithout_results.tsv')
+df_cli$`NCT Number` %>% unique %>% length # 190
+
+# nutrientional <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/nutrientional_drugbank_results.csv') %>% pull(Name)
+# df_cli %<>% filter(!(drug %in% nutrientional))
+# df_cli %<>% filter(`Study Type` == 'Interventional')
+# df_cli %<>% filter(Phases != 'Not Applicable')
+# df_cli %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/clinical_trials_download/TPHP_beast_endometrial_cancer_clinical_trials_hasResult_Interventional_phaseApplicable_without_nuterentional.tsv')
+# 
+
+```
+
+
+
+
+
+
+# 2. GDSC resource
+## data preparation
+```{r}
+df_dose1 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/GDSC1_fitted_dose_response_24Jul22.csv')
+df_dose2 <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/GDSC2_fitted_dose_response_24Jul22.csv')
+
+# identical(colnames(df_dose1), colnames(df_dose2)) # TRUE
+df_dose <- rbind(df_dose1, df_dose2)
+
+
+# combine with cell_line table
+df_cosmic <-  readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/Cell_Lines_Details.xlsx', sheet = 'COSMIC tissue classification')
+df_merge1 <- full_join(df_cosmic, df_dose, by = 'COSMIC_ID')
+
+
+# map gene to UniprotID 
+df_gene <- df_merge1 %>% select(PUTATIVE_TARGET) %>% distinct()
+UniprotID <- c()
+for(i in 1:length(df_gene$PUTATIVE_TARGET)){
+  print(str_glue('Search gene {i}/{length(df_gene$PUTATIVE_TARGET)}'))
+  gene_symbol <- df_gene$PUTATIVE_TARGET[i]
+  gene_symbols <- str_split(gene_symbol, ', ')[[1]]
+  uniprot_id <- sapply(gene_symbols, genesymbol_to_uniprotid)
+  UniprotID[i] <- str_c(uniprot_id, collapse = ', ')
+}
+df_gene$UniprotID <- UniprotID
+rio::export(df_gene, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_target_to_uniprotid.xlsx')
+
+
+# combine with GeneSymbol_UniprotID table
+df_gene <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_target_to_uniprotid_edited.xlsx')
+df_merge2 <- full_join(df_merge1, df_gene, by = 'PUTATIVE_TARGET') %>%
+  relocate(UniprotID, .after = PUTATIVE_TARGET)
+rio::export(df_merge2, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_fitted_dose_response_add_uniprotid.xlsx')
+
+
+# filter with upregulated proteins
+file_ls <- list.files('//172.16.13.136/share/members/yuel/2022/dysregulated proteins/',
+                      pattern = '*\\.xlsx$', full.names = T)
+organs <- str_extract(file_ls, '05p_.+\\.xlsx') %>%
+  str_replace('05p_', '') %>% str_replace('\\.xlsx', '')
+
+tbl1_ls <- lapply(file_ls, readxl::read_excel, sheet = 1)
+tbl_ls <- lapply(seq_along(file_ls), function(i){# up only
+  df_up <- tbl1_ls[[i]]
+})
+names(tbl_ls) <- organs
+df_up <- plyr::ldply(tbl_ls, function(dfsub){
+  dfsub
+}, .id = 'organ')
+prot_up <- unique(df_up$prot)
+
+df_gene_up <- 
+  df_gene %>%
+  filter(
+    str_detect(UniprotID, pattern = str_c(prot_up, collapse = '|'))
+  )
+df_gene_up$UniprotID <- str_split(df_gene_up$UniprotID, '(,)|(, )|(;)') %>%
+  lapply(function(x){
+    str_trim(x) %>% .[. != '-'] %>% unique() %>% sort() %>% str_c(collapse = ';')
+  }) %>%
+  unlist()
+df_merge2up <- inner_join(df_merge1, df_gene_up, by = 'PUTATIVE_TARGET') %>%
+  relocate(UniprotID, .after = PUTATIVE_TARGET)
+rio::export(df_merge2up, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_fitted_dose_response_tphp-up_add_uniprotid.xlsx')
+
+# df_gene_up %>% separate_rows('UniprotID') %>%
+#   distinct() %>%
+#   group_by(UniprotID) %>%
+#   summarise(PUTATIVE_TARGET)
+
+```
+
+
+## ANOVA tables
+```{r}
+ano1_ls <- read_excel_allsheets('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/ANOVA_results_GDSC1_24Jul22.xlsx')
+types <- ano1_ls[[1]] %>% # ANOVA tables2 required assigned column types
+  summarise_all(typeof) %>%
+  unlist() %>% unname() %>%
+  str_replace_all('double', 'numeric') %>%
+  str_replace_all('character', 'text')
+ano2_ls <- read_excel_allsheets('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/ANOVA_results_GDSC2_24Jul22.xlsx', col_types = types)
+
+
+df_ano1 <- plyr::ldply(ano1_ls)
+df_ano2 <- plyr::ldply(ano2_ls)
+df_ano <- rbind(df_ano1, df_ano2) %>% select(-.id)
+
+df_merge2up <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_fitted_dose_response_tphp-up_add_uniprotid.xlsx')
+df_ano_up <- df_merge2up %>%
+  select(PUTATIVE_TARGET, UniprotID) %>%
+  rename(target = PUTATIVE_TARGET) %>%
+  distinct() %>%
+  inner_join(df_ano, by = 'target')
+
+# tissue label
+df_label <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/Cell_Lines_Details.xlsx', sheet = 'Decode')
+df_label %<>% slice(2:31) %>% setNames(c('tissue_type', 'TCGA Definition'))
+df_ano_up$tissue_type %>% unique() %>% sort() %>% setdiff(df_label$tissue_type)
+df_label %<>% add_row(tissue_type = 'PANCANCER', `TCGA Definition` = 'PANCANCER')
+rio::export(df_label, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_tissue_label.xlsx')
+
+df_label <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_tissue_label_edited.xlsx')
+df_ano_up %<>% inner_join(df_label, ., by = 'tissue_type')
+
+rio::export(df_ano_up, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_tphp-up.xlsx')
+
+
+# ANOVA filter
+df_ano_up_fdr <- df_ano_up %>% filter(fdr < 0.01)
+rio::export(df_ano_up_fdr, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_tphp-up_fdr.xlsx')
+
+
+df_ano_up_fdr1 <- df_ano_up_fdr %>%
+  select(`TCGA Definition`, GDSC_organ, UniprotID, drug_name) %>% distinct() %>%
+  separate_rows('UniprotID') %>%
+  filter(UniprotID %in% prot_up) %>%
+  distinct() %>%
+  rename(prot = UniprotID) %>%
+  inner_join(df_up[, 1:2], by = 'prot')
+rio::export(df_ano_up_fdr1, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_tphp-up_fdr_simple.xlsx')
+
+df_ano_up_fdr2 <- df_ano_up_fdr1 %>% filter(str_detect(GDSC_organ, as.character(organ)))
+rio::export(df_ano_up_fdr2, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_tphp-up_fdr_simple_overlap.xlsx')
+
+
+
+# definitions <- df_ano_up_fdr1$`TCGA Definition` %>% unique() %>% sort()
+ano_up_fdr1_ls <- df_ano_up_fdr1 %>% select(`TCGA Definition`, prot) %>% distinct() %>%
+  setNames(c('TCGA', 'prot')) %>%
+  plyr::dlply(.variables = 'TCGA', function(dfsub){
+    dfsub$prot
+  })
+UpSetR::upset(UpSetR::fromList(ano_up_fdr1_ls), order.by = "freq")
+```
+
+
+
+
+
+# new --
+## carcinoma upregulated proteins overlap
+```{r}
+file_ls <- list.files('//172.16.13.136/share/members/yuel/2022/dysregulated proteins/',
+                      pattern = '*\\.xlsx$', full.names = T)
+organs <- str_extract(file_ls, '05p_.+\\.xlsx') %>%
+  str_replace('05p_', '') %>% str_replace('\\.xlsx', '')
+
+tbl1_ls <- lapply(file_ls, readxl::read_excel, sheet = 1)
+tbl_ls <- lapply(seq_along(file_ls), function(i){# up only
+  df_up <- tbl1_ls[[i]]
+})
+names(tbl_ls) <- organs
+df_up <- plyr::ldply(tbl_ls, function(dfsub){
+  dfsub
+}, .id = 'organ')
+prots_up <- sort(unique(df_up$prot))
+
+df_up1 <- df_up %>% select(organ, prot)
+up1_ls <- plyr::dlply(df_up1, 'organ', function(dfsub){
+  dfsub$prot
+})
+UpSetR::upset(UpSetR::fromList(up1_ls), order.by = "freq", nsets = 2)
+
+df_up_ <- df_up %>% filter(organ %in% c('mammary gland', 'uterus'))
+
+```
+
+
+
+
+
+## ANOVA tables
+```{r}
+ano1_ls <- read_excel_allsheets('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/ANOVA_results_GDSC1_24Jul22.xlsx')
+types <- ano1_ls[[1]] %>% # ANOVA tables2 required assigned column types
+  summarise_all(typeof) %>%
+  unlist() %>% unname() %>%
+  str_replace_all('double', 'numeric') %>%
+  str_replace_all('character', 'text')
+ano2_ls <- read_excel_allsheets('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/ANOVA_results_GDSC2_24Jul22.xlsx', col_types = types)
+
+
+df_ano1 <- plyr::ldply(ano1_ls)
+df_ano2 <- plyr::ldply(ano2_ls)
+df_ano <- rbind(df_ano1, df_ano2) %>% select(-.id)
+df_ano_gl <- df_ano %>% filter(str_detect(feature_name, '(gain\\.)|(loss\\.)')) # with gain/loss in feature
+
+
+
+
+df_merge2up <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_fitted_dose_response_tphp-up_add_uniprotid.xlsx')
+df_ano_up <- df_merge2up %>%
+  select(PUTATIVE_TARGET, UniprotID) %>%
+  rename(target = PUTATIVE_TARGET) %>%
+  distinct() %>%
+  inner_join(df_ano_gl, by = 'target')
+
+# # tissue label
+# df_label <- readxl::read_excel('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/GDSC_resource/release-8.4/Cell_Lines_Details.xlsx', sheet = 'Decode')
+# df_label %<>% slice(2:31) %>% setNames(c('tissue_type', 'TCGA Definition'))
+# df_ano_up$tissue_type %>% unique() %>% sort() %>% setdiff(df_label$tissue_type)
+# df_label %<>% add_row(tissue_type = 'PANCANCER', `TCGA Definition` = 'PANCANCER')
+# rio::export(df_label, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_tissue_label.xlsx')
+
+df_label <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_tissue_label_edited.xlsx') %>% select(1:3)
+df_ano_up %<>% inner_join(df_label, ., by = 'tissue_type')
+# prots_up_ptn <- str_c(prots_up, collapse = '|')
+df_ano_up %<>% filter(`TCGA Definition` != 'PANCANCER', # without PANCANCER
+                      # str_detect(UniprotID, prots_up_ptn)
+)
+rio::export(df_ano_up, '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_LOSSorGAIN_tphp-up.xlsx')
+
+
+df_ano_up_sim <- df_ano_up %>%
+  select(drug_name, tissue_type, `TCGA Definition`, GDSC_organ, target, UniprotID, feature_name, feature_delta_mean_ic50)
+rio::export(df_ano_up_sim , '//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_LOSSorGAIN_tphp-up_simple.xlsx')
+
+
+
+
+
+
+
+# 比较相同 target 情况下，不同 organ 的 feature_delta_mean_ic50含量差异，及其在 TPHP data 中是否为相应 organ 的 upregulated protein
+df_ano_up_sim %<>% arrange(target, tissue_type) %>%
+  filter(!is.na(GDSC_organ))
+
+
+
+```
+
+
+
+<!-- # ```{r} -->
+<!-- # df_ano_up_sim_test <- df_ano_up_sim %>% filter(target == 'ABL') -->
+<!-- # df_ano_up_sim_test$tissue_type %<>% factor() -->
+<!-- #  -->
+<!-- # # df_up_ %>% filter(prot == 'P00519') -->
+<!-- # logmean <- function(x){log(mean(exp(x)))} -->
+<!-- #  -->
+<!-- # df_ano_up_sim_test %>% -->
+<!-- #   group_by(tissue_type, GDSC_organ) %>% -->
+<!-- #   summarise(mean = logmean(feature_delta_mean_ic50)) -->
+<!-- #  -->
+<!-- # df_ano_up_sim_test %>% -->
+<!-- #   group_by(tissue_type, GDSC_organ, feature_name) %>% -->
+<!-- #   summarise(mean = logmean(feature_delta_mean_ic50)) -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # # line only -->
+<!-- # df_plot <- df_ano_up_sim_test %>% -->
+<!-- #   group_by(tissue_type) %>% -->
+<!-- #   summarise(mean = logmean(feature_delta_mean_ic50)) %>% -->
+<!-- #   arrange(desc(mean)) %>% -->
+<!-- #   mutate(tissue_type = factor(tissue_type, levels = unique(.$tissue_type))) %>% -->
+<!-- #   mutate(rank = 1:nrow(.)) -->
+<!-- #  -->
+<!-- # p1 <- ggplot(df_plot, aes(x = tissue_type, y = mean)) + -->
+<!-- #   # geom_line(aes(tissue_type)) + -->
+<!-- #   geom_point(aes(color = tissue_type)) + -->
+<!-- #   geom_smooth(mapping = aes(x = rank, y = mean), data = df_plot, method = 'loess', color = '#487DF0') + -->
+<!-- #   theme_bw()+ -->
+<!-- #     theme(legend.text = element_text(size = 18, color = "black"), -->
+<!-- #           legend.position = 'top', -->
+<!-- #           legend.title = element_text(size = 18, color="black") , -->
+<!-- #           panel.grid.major =element_blank(), -->
+<!-- #           panel.grid.minor = element_blank(), -->
+<!-- #           panel.background = element_blank(), -->
+<!-- #           axis.line = element_line(colour = "black"))+ -->
+<!-- #     theme(panel.grid =element_blank())+ -->
+<!-- #     theme(axis.text = element_text(size = 15,color = "black"))+ -->
+<!-- #     theme(axis.text.x = element_text(size = 15,color = "black", angle = 0))+ -->
+<!-- #     theme(plot.title = element_text(size = 20, face = "bold"))+ -->
+<!-- #     theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+ -->
+<!-- #     theme(axis.title.x=element_text(size = 18, hjust = 0.5, color="black"))+ -->
+<!-- #     theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black")) -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # df_ano_up_sim_test %<>% -->
+<!-- #   mutate(tissue_type = factor(tissue_type, levels = levels(df_plot$tissue_type))) %>% -->
+<!-- #   arrange(desc(tissue_type)) -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # # scatter -->
+<!-- # p2 <- ggplot(df_ano_up_sim_test, aes(x = feature_name, y = feature_delta_mean_ic50, group = tissue_type)) + -->
+<!-- #   # geom_line(aes(tissue_type)) + -->
+<!-- #   geom_point(aes(color = tissue_type)) + -->
+<!-- #   theme_bw()+ -->
+<!-- #     theme(legend.text = element_text(size = 18, color = "black"), -->
+<!-- #           legend.position = 'top', -->
+<!-- #           legend.title = element_text(size = 18, color="black") , -->
+<!-- #           panel.grid.major =element_blank(), -->
+<!-- #           panel.grid.minor = element_blank(), -->
+<!-- #           panel.background = element_blank(), -->
+<!-- #           axis.line = element_line(colour = "black"))+ -->
+<!-- #     theme(panel.grid =element_blank())+ -->
+<!-- #     theme(axis.text = element_text(size = 15,color = "black"))+ -->
+<!-- #     theme(axis.text.x = element_text(size = 15,color = "black", angle = 0))+ -->
+<!-- #     theme(plot.title = element_text(size = 20, face = "bold"))+ -->
+<!-- #     theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+ -->
+<!-- #     theme(axis.title.x=element_text(size = 18, hjust = 0.5, color="black"))+ -->
+<!-- #     theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black")) -->
+<!-- #  -->
+<!-- # ggsave('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_LOSSorGAIN_tphp-up_simple_test.pdf', p, width = 16, height = 9) -->
+<!-- #  -->
+<!-- #  -->
+<!-- #  -->
+<!-- # # combine -->
+<!-- # p <-  -->
+<!-- #   ggplot() + -->
+<!-- #   # geom_line(aes(feature_name)) + -->
+<!-- #   geom_point(mapping = aes(x = tissue_type, y = feature_delta_mean_ic50, group = feature_name, color = feature_name), -->
+<!-- #              data = df_ano_up_sim_test) + -->
+<!-- #   geom_smooth(mapping = aes(x = rank, y = mean), data = df_plot, method = 'loess', color = '#487DF0')+ -->
+<!-- #   theme_bw()+ -->
+<!-- #     theme(legend.text = element_text(size = 18, color = "black"), -->
+<!-- #           legend.position = 'none', -->
+<!-- #           legend.title = element_text(size = 18, color="black") , -->
+<!-- #           panel.grid.major =element_blank(), -->
+<!-- #           panel.grid.minor = element_blank(), -->
+<!-- #           panel.background = element_blank(), -->
+<!-- #           axis.line = element_line(colour = "black"))+ -->
+<!-- #     theme(panel.grid =element_blank())+ -->
+<!-- #     theme(axis.text = element_text(size = 15,color = "black"))+ -->
+<!-- #     theme(axis.text.x = element_text(size = 15,color = "black", angle = 0))+ -->
+<!-- #     theme(plot.title = element_text(size = 20, face = "bold"))+ -->
+<!-- #     theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+ -->
+<!-- #     theme(axis.title.x=element_text(size = 18, hjust = 0.5, color="black"))+ -->
+<!-- #     theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black")) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # ``` -->
+
+
+## map dysregulated protein to organs
+```{r}
+df_prot2organ <- df_up %>% select(organ, prot) %>%
+  group_by(prot) %>%
+  summarise(organ = str_c(sort(unique(organ)), collapse = ';'))
+
+ano_prots <- lapply(df_ano_up_sim$UniprotID, function(x) str_split(x, ';')[[1]]) %>%
+  unlist() %>% unique()
+df_prot2organ1 <- df_prot2organ %>% filter(prot %in% ano_prots)
+ht_prot2organ1 <- df_prot2organ1$organ
+names(ht_prot2organ1) <- df_prot2organ1$prot
+df_ano_up_sim$TPHP_organ <- sapply(df_ano_up_sim$UniprotID, function(x){
+  xx <- str_split(x, ';')[[1]]
+  ht_prot2organ1[xx] %>% na.omit() %>% str_c(collapse = ';') %>% str_split(';') %>% .[[1]] %>%
+    unique() %>% sort() %>% str_c(collapse = ';')
+})
+
+
+
+
+drugs <- sort(unique(df_ano_up_sim$drug_name))
+pdf('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_LOSSorGAIN_overlapped_tphp-up_target_drugs.pdf', width = 16, height = 9)
+for(i in seq_along(drugs)){
+  drug <- drugs[i]
+  df_this_drug <- df_ano_up_sim %>% filter(drug_name == all_of(drug))
+  df_this_drug$tissue_type %<>% factor()
+  
+  logmean <- function(x){log(mean(exp(x)))} # function: mean of log
+  
+  organ_tphp <- df_this_drug$TPHP_organ[1]
+  this_prot <- df_this_drug$UniprotID[1]
+  this_target <- df_this_drug$target[1]
+  this_title <- str_c(drug, organ_tphp, this_prot, this_target, sep = ' ~ ')
+  
+  
+  tissue_types <- df_this_drug %>%
+    filter(str_detect(df_this_drug$GDSC_organ, str_replace_all(organ_tphp, ';', '|'))) %>%
+    pull(tissue_type) %>%
+    unique()
+  
+  
+  df_plot <- df_this_drug %>%
+    group_by(tissue_type) %>%
+    summarise(mean = logmean(feature_delta_mean_ic50)) %>%
+    arrange(desc(mean)) %>%
+    mutate(tissue_type = factor(tissue_type, levels = unique(.$tissue_type))) %>%
+    mutate(rank = 1:nrow(.))
+  
+  
+  
+  df_this_drug %<>%
+    mutate(tissue_type = factor(tissue_type, levels = levels(df_plot$tissue_type))) %>%
+    arrange(desc(tissue_type)) %>%
+    mutate(alpha = ifelse(.$tissue_type %in% all_of(tissue_types), 1, 0.5))
+  
+  p <- 
+    ggplot() +
+    # geom_line(aes(feature_name)) +
+    geom_point(mapping = aes(x = tissue_type, y = feature_delta_mean_ic50, group = feature_name, color = feature_name, alpha = alpha),
+               data = df_this_drug) +
+    geom_smooth(mapping = aes(x = rank, y = mean), data = df_plot, method = 'loess', color = '#487DF0')+
+    labs(subtitle = this_title,
+         y = 'Feature delta mean IC50')+
+    theme_bw()+
+    theme(legend.text = element_text(size = 18, color = "black"),
+          legend.position = 'none',
+          legend.title = element_text(size = 18, color="black") ,
+          panel.grid.major =element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))+
+    theme(panel.grid =element_blank())+
+    theme(axis.text = element_text(size = 15,color = "black"))+
+    theme(axis.text.x = element_text(size = 15,color = "black", angle = 90, vjust = 0.5))+
+    theme(plot.title = element_text(size = 20, face = "bold"))+
+    theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+
+    theme(axis.title.x=element_blank())+
+    theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black"))
+  
+  print(p)
+  
+}
+graphics.off()
+
+```
+
+
+## gain & loss
+```{r}
+# LOSS
+pdf('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_LOSS_tphp-up_overlapped_target_drugs.pdf', width = 16, height = 9)
+for(i in seq_along(drugs)){
+  drug <- drugs[i]
+  df_this_drug <- df_ano_up_sim %>%
+    filter(str_detect(feature_name, 'loss\\.')) %>%
+    filter(drug_name == all_of(drug))
+  df_this_drug$tissue_type %<>% factor()
+  
+  logmean <- function(x){log(mean(exp(x)))} # function: mean of log
+  
+  organ_tphp <- df_this_drug$TPHP_organ[1]
+  this_prot <- df_this_drug$UniprotID[1]
+  this_target <- df_this_drug$target[1]
+  this_title <- str_c(drug, organ_tphp, this_prot, this_target, sep = ' ~ ')
+  
+  
+  tissue_types <- df_this_drug %>%
+    filter(str_detect(df_this_drug$GDSC_organ, str_replace_all(organ_tphp, ';', '|'))) %>%
+    pull(tissue_type) %>%
+    unique()
+  
+  
+  df_plot <- df_this_drug %>%
+    group_by(tissue_type) %>%
+    summarise(mean = logmean(feature_delta_mean_ic50)) %>%
+    arrange(desc(mean)) %>%
+    mutate(tissue_type = factor(tissue_type, levels = unique(.$tissue_type))) %>%
+    mutate(rank = 1:nrow(.))
+  
+  
+  
+  df_this_drug %<>%
+    mutate(tissue_type = factor(tissue_type, levels = levels(df_plot$tissue_type))) %>%
+    arrange(desc(tissue_type)) %>%
+    mutate(alpha = ifelse(.$tissue_type %in% all_of(tissue_types), 1, 0.5))
+  
+  p <- 
+    ggplot() +
+    # geom_line(aes(feature_name)) +
+    geom_point(mapping = aes(x = tissue_type, y = feature_delta_mean_ic50, group = feature_name, color = feature_name, alpha = alpha),
+               data = df_this_drug) +
+    geom_smooth(mapping = aes(x = rank, y = mean), data = df_plot, method = 'loess', color = '#487DF0')+
+    labs(subtitle = this_title,
+         y = 'Feature delta mean IC50')+
+    theme_bw()+
+    theme(legend.text = element_text(size = 18, color = "black"),
+          legend.position = 'none',
+          legend.title = element_text(size = 18, color="black") ,
+          panel.grid.major =element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))+
+    theme(panel.grid =element_blank())+
+    theme(axis.text = element_text(size = 15,color = "black"))+
+    theme(axis.text.x = element_text(size = 15,color = "black", angle = 90, vjust = 0.5))+
+    theme(plot.title = element_text(size = 20, face = "bold"))+
+    theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+
+    theme(axis.title.x=element_blank())+
+    theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black"))
+  
+  print(p)
+  
+}
+graphics.off()
+
+
+
+
+# GAIN
+pdf('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/GDSC_ANOVA_GAIN_tphp-up_overlapped_target_drugs.pdf', width = 16, height = 9)
+for(i in seq_along(drugs)){
+  drug <- drugs[i]
+  df_this_drug <- df_ano_up_sim %>%
+    filter(str_detect(feature_name, 'gain\\.')) %>%
+    filter(drug_name == all_of(drug))
+  df_this_drug$tissue_type %<>% factor()
+  
+  logmean <- function(x){log(mean(exp(x)))} # function: mean of log
+  
+  organ_tphp <- df_this_drug$TPHP_organ[1]
+  this_prot <- df_this_drug$UniprotID[1]
+  this_target <- df_this_drug$target[1]
+  this_title <- str_c(drug, organ_tphp, this_prot, this_target, sep = ' ~ ')
+  
+  
+  tissue_types <- df_this_drug %>%
+    filter(str_detect(df_this_drug$GDSC_organ, str_replace_all(organ_tphp, ';', '|'))) %>%
+    pull(tissue_type) %>%
+    unique()
+  
+  
+  df_plot <- df_this_drug %>%
+    group_by(tissue_type) %>%
+    summarise(mean = logmean(feature_delta_mean_ic50)) %>%
+    arrange(desc(mean)) %>%
+    mutate(tissue_type = factor(tissue_type, levels = unique(.$tissue_type))) %>%
+    mutate(rank = 1:nrow(.))
+  
+  
+  
+  df_this_drug %<>%
+    mutate(tissue_type = factor(tissue_type, levels = levels(df_plot$tissue_type))) %>%
+    arrange(desc(tissue_type)) %>%
+    mutate(alpha = ifelse(.$tissue_type %in% all_of(tissue_types), 1, 0.5))
+  
+  p <- 
+    ggplot() +
+    # geom_line(aes(feature_name)) +
+    geom_point(mapping = aes(x = tissue_type, y = feature_delta_mean_ic50, group = feature_name, color = feature_name, alpha = alpha),
+               data = df_this_drug) +
+    geom_smooth(mapping = aes(x = rank, y = mean), data = df_plot, method = 'loess', color = '#487DF0')+
+    labs(subtitle = this_title,
+         y = 'Feature delta mean IC50')+
+    theme_bw()+
+    theme(legend.text = element_text(size = 18, color = "black"),
+          legend.position = 'none',
+          legend.title = element_text(size = 18, color="black") ,
+          panel.grid.major =element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))+
+    theme(panel.grid =element_blank())+
+    theme(axis.text = element_text(size = 15,color = "black"))+
+    theme(axis.text.x = element_text(size = 15,color = "black", angle = 90, vjust = 0.5))+
+    theme(plot.title = element_text(size = 20, face = "bold"))+
+    theme(plot.subtitle=element_text(size = 20, hjust = 0, color="black"))+
+    theme(axis.title.x=element_blank())+
+    theme(axis.title.y=element_text(size = 18, hjust = 0.5, color="black"))
+  
+  print(p)
+  
+}
+graphics.off()
+
+
+```
+
+
+# 2. GDSC use S4C table
+```{r}
+dfs4c <- rio::import('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TableS4C-ANOVAsignificantHits.xlsx')
+dfs4c1 <- dfs4c %>% filter(str_detect(FEATURE, 'gain:')) # select gain
+dfs4c2 <- dfs4c1 %>% filter(str_detect(FEATURE, '\\(.+?\\)')) # select which with target name
+
+
+# map gene to UniprotID 
+gene_symbols <- str_extract_all(dfs4c2$FEATURE, '\\(.+?\\)') %>%
+  unlist() %>% unique() %>%
+  str_replace_all('\\(|\\)', '') %>%
+  str_c(collapse = ',') %>%
+  str_split(',') %>% .[[1]] %>%
+  unique()
+uniprotids <- c()
+for(i in seq_along(gene_symbols)){
+  gene_symbol <- gene_symbols[i]
+  print(str_glue('{gene_symbol}  {i}/{length(gene_symbols)}'))
+  uniprotids[i] <- genesymbol_to_uniprotid(gene_symbol)
+}
+
+ht_gene2prot <- uniprotids
+names(ht_gene2prot) <- gene_symbols
+
+
+dfs4c3 <- dfs4c2 %>%
+  add_column(
+    FEATURE_GENE = sapply(dfs4c2$FEATURE, function(x){
+      x %>%
+        str_extract_all('\\(.+?\\)') %>%
+        unlist() %>% unique() %>%
+        str_replace_all('\\(|\\)', '') %>%
+        str_c(collapse = ',') %>%
+        str_split(',') %>% .[[1]] %>%
+        unique() %>%
+        str_c(collapse = ',')
+    }),
+    FEATURE_PROTEIN = sapply(dfs4c2$FEATURE, function(x){
+      x %>%
+        str_extract_all('\\(.+?\\)') %>%
+        unlist() %>% unique() %>%
+        str_replace_all('\\(|\\)', '') %>%
+        str_c(collapse = ',') %>%
+        str_split(',') %>% .[[1]] %>%
+        unique() %>%
+        ht_gene2prot[.] %>%
+        str_c(collapse = ',')
+    }),
+    .before = 'FEATURE'
+  )
+dfs4c3 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TableS4C-ANOVAsignificantHits_addcolumn_gene_protein.xlsx')
+
+dfs4c3[dfs4c3$Domain == 'COAD/READ', 'Domain'] <- 'COREAD'
+dfs4c4 <- dfs4c3 %>%
+  rename(tissue_type = Domain) %>%
+  right_join(df_label, ., by = 'tissue_type')
+dfs4c4[dfs4c4$tissue_type == 'PANCAN', 'GDSC_organ'] <- 'PANCAN'
+
+organ_prot_ls <- df_tbls %>% select(organ, UniprotID) %>% distinct() %>%
+  plyr::dlply('organ', pull, UniprotID)
+organ_prot_ls[['PANCAN']] <- unique(df_tbls$UniprotID)
+
+dfs4c4 %<>% add_column(
+  FEATURE_PROTEIN_mapped = apply(dfs4c4, 1, function(row){
+    if(is.na(row['GDSC_organ'])){
+      prots <- NA
+    } else{
+      prots <- row['GDSC_organ'] %>% str_split(';') %>% .[[1]] %>%
+        lapply(function(e) organ_prot_ls[[e]]) %>%
+        unlist() %>% unique()
+    }
+    feature_prots <- row['FEATURE_PROTEIN'] %>% str_split(',') %>% .[[1]]
+    prot_inter <- intersect(prots, feature_prots)
+    ret <- str_c(prot_inter, collapse = ';')
+    ret <- ifelse(ret == '', NA, ret)
+    return(ret)
+  }),
+  .after = 'FEATURE_PROTEIN'
+)
+prot_organ_ls <- df_tbls %>% select(organ, UniprotID) %>% distinct() %>%
+  plyr::dlply('UniprotID', function(dfsub){
+    dfsub %>% pull(organ)
+  })
+
+
+dfs4c4 %<>% add_column(
+  FEATURE_PROTEIN_mapped_organ = sapply(dfs4c4$FEATURE_PROTEIN_mapped, function(x){
+    if(is.na(x)){
+      ret <- NA
+    } else{
+      ret <- str_split(x, ';') %>% unlist() %>% lapply(function(e) prot_organ_ls[[e]] %>% str_c(collapse = ',')) %>% unlist() %>% str_c(collapse = ';')
+    }
+  }),
+  .after = 'FEATURE_PROTEIN_mapped'
+)
+dfs4c4 %>% rio::export('//172.16.13.136/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/TableS4C-ANOVAsignificantHits_addcolumn_gene_protein_organ.xlsx')
+
+
+
+```
+
+
+
+```{r}
+prot_bre_end <- intersect(tbl_ls$uterus$prot, tbl_ls$`mammary gland`$prot) # endometrial/breast overlapp
+
+
+```
+
+
+
+```{r}
+# save.image()
+# load('.RData')
+
+```
+
+
+

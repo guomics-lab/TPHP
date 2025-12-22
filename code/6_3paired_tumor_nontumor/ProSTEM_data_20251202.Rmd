@@ -1,0 +1,1958 @@
+---
+title: "ProSTEM_data_20251202"
+author: "JiangWenhao"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# setwd('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/')
+
+library(tidyverse)
+library(magrittr)
+library(ggrepel)
+library(reticulate)
+source_python('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/TPHP_carcinoma_upregulated_overlapped_drugbank/drugbank_crawl_source.py') # source from python
+
+set_coltype_num <- function(df){
+  for(i in 1:ncol(df)){
+    na_num <- sum(is.na(df[[i]]))
+    tmp <- as.numeric(df[[i]])
+    if(sum(is.na(tmp)) == na_num){
+      df[[i]] <- tmp
+    }
+  }
+  return(df)
+}
+```
+
+# 1.data preparation (V20251202)
+based on V20230220
+
+```{r}
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/1-s2.0-S1535610822002744-mmc6.xlsx', sheet = 'All Drug-Protein associations')
+df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/1-s2.0-S1535610822002744-mmc6.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/1-s2.0-S1535610822002744-mmc6.xlsx', sheet = 'All CRISPR-Protein associations')
+df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/1-s2.0-S1535610822002744-mmc6.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+
+# reset colnames
+df_drug_protein %<>% setNames(.[1, ]) %>% slice(-1)
+df_tissue_drug %<>% setNames(.[1, ]) %>% slice(-1)
+df_crispr_protein %<>% setNames(.[1, ]) %>% slice(-1)
+df_tissue_crispr %<>% setNames(.[1, ]) %>% slice(-1)
+
+
+# reset data type
+df_drug_protein %<>% set_coltype_num
+df_tissue_drug %<>% set_coltype_num
+df_crispr_protein %<>% set_coltype_num
+df_tissue_crispr %<>% set_coltype_num
+
+tmp_ls <- list(
+  `All Drug-Protein associations` = df_drug_protein,
+  `DeeProM Tissue-level Drug` = df_tissue_drug,
+  `All CRISPR-Protein associations` = df_crispr_protein,
+  `DeeProM Tissue-level CRISPR` = df_tissue_crispr
+)
+rio::export(tmp_ls, '//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_20221017.xlsx')
+
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_20221017.xlsx', sheet = 'All Drug-Protein associations')
+df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_20221017.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_20221017.xlsx', sheet = 'All CRISPR-Protein associations')
+df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_20221017.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+
+# filter: fdr | nc_fdr < 1%, abs(beta | nc_beta) > 0.1
+#has been done in original data
+df_drug_protein %<>% filter(
+  (fdr < 0.01 | nc_fdr < 0.01), (abs(beta) > 0.1 | abs(nc_beta) > 0.1)
+)
+
+df_tissue_drug %<>% filter(
+  (fdr < 0.01 | nc_fdr < 0.01), (abs(beta) > 0.1 | abs(nc_beta) > 0.1)
+)
+
+df_crispr_protein %<>% filter(
+  (fdr < 0.01 | nc_fdr < 0.01), (abs(beta) > 0.1 | abs(nc_beta) > 0.1)
+)
+
+df_tissue_crispr %<>% filter(
+  (fdr < 0.01 | nc_fdr < 0.01), (abs(beta) > 0.1 | abs(nc_beta) > 0.1)
+)
+
+```
+
+## map gene names to protein ids
+```{r}
+targets <- unique(c(df_drug_protein$x_id, df_tissue_drug$x_id, df_crispr_protein$x_id))
+
+########################################################
+##### gene_name ~ protein_id table has been saved ####
+# UniprotID <- c()
+# for(i in 1:length(targets)){
+#   print(str_glue('Search gene {i}/{length(targets)}'))
+#   gene_symbol <- targets[i]
+#   uniprot_id <- genesymbol_to_uniprotid(gene_symbol)
+#   UniprotID[i] <- uniprot_id
+# }
+# df_gene <- data.frame(x_id = targets,
+#                       Uniprot = UniprotID)
+# 
+# # check mapped results
+# sum(is.na(df_gene$Uniprot))
+# str_subset(df_gene$Uniprot, ',|;')
+# uniprot_dup <- df_gene %>% count(Uniprot) %>%
+#   filter(n > 1) %>%
+#   pull(Uniprot)
+# df_gene %>% filter(Uniprot %in% uniprot_dup) %>%
+#   arrange(Uniprot, x_id)
+# rio::export(df_gene, '//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/ProSTEM_5052gene_to_protein_20221018.xlsx')
+
+df_gene <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/ProSTEM_5052gene_to_protein_20221018.xlsx')
+
+
+df_drug_protein %<>% left_join(df_gene, by = 'x_id') %>%
+  relocate(Uniprot, .after = x_id)
+df_tissue_drug %<>% left_join(df_gene, by = 'x_id') %>%
+  relocate(Uniprot, .after = x_id)
+df_crispr_protein %<>% left_join(df_gene, by = 'x_id') %>%
+  relocate(Uniprot, .after = x_id)
+df_tissue_crispr %<>% left_join(df_gene, by = 'x_id') %>%
+  relocate(Uniprot, .after = x_id)
+
+
+```
+
+
+## carcinoma upregulated proteins
+```{r}
+# file_ls <- list.files('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/diff_expr/',
+#                       pattern = '^20230116_CA_ADJ.*\\.xlsx$', full.names = T)
+# cancer_abbrs <- str_extract(file_ls, '05p_.+\\.xlsx') %>%
+#   str_replace('05p_', '') %>% str_replace('\\.xlsx', '')
+# tbl1_ls <- lapply(file_ls, readxl::read_excel, sheet = 1)# up only
+# tbl_ls <- lapply(seq_along(file_ls), function(i){
+#   df_up <- tbl1_ls[[i]]
+# })
+# names(tbl_ls) <- cancer_abbrs
+df_up <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx',
+                       sheet = 3) %>% 
+  filter(g_adj > 0)
+df_up %<>% rename(prot = protein) %>% mutate(type = 'up')
+prots_up <- sort(unique(df_up$prot))
+
+
+# tbl2_ls <- lapply(file_ls, readxl::read_excel, sheet = 2)# down only
+# tbl_ls <- lapply(seq_along(file_ls), function(i){
+#   df_down <- tbl2_ls[[i]]
+# })
+# names(tbl_ls) <- cancer_abbrs
+# df_down <- plyr::ldply(tbl_ls, function(dfsub){
+#   dfsub
+# }, .id = 'cancer_abbr')
+df_down <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx',
+                       sheet = 3) %>% 
+  filter(g_adj < 0)
+df_down %<>% rename(prot = protein) %>% mutate(type = 'down')
+prots_down <- sort(unique(df_down$prot))
+
+
+
+df_up_down <- rbind(df_up, df_down)
+prots_up_down <- sort(unique(df_up_down$prot))
+
+df_up_cancer_abbrcentroid <- df_up %>%
+  select(cancer_abbr, prot, type) %>%
+  distinct() %>%
+  plyr::ddply('prot', function(dfsub){
+  dfsub %<>% mutate(cancer_abbr = str_c(sort(unique(cancer_abbr)), collapse = ';'))
+}) %>% distinct()
+df_down_cancer_abbrcentroid <- df_down %>%
+  select(cancer_abbr, prot, type) %>%
+  distinct() %>%
+  plyr::ddply('prot', function(dfsub){
+  dfsub %<>% mutate(cancer_abbr = str_c(sort(unique(cancer_abbr)), collapse = ';'))
+}) %>% distinct()
+# df_up_down_cancer_abbrcentroid <- rbind(df_up_cancer_abbrcentroid, df_down_cancer_abbrcentroid)
+
+
+```
+
+### df_drug_protein
+
+```{r}
+# sum(df_drug_protein$beta * df_drug_protein$nc_beta < 0) # 9343
+df_drug_protein_up <- df_drug_protein %>%
+  filter(Uniprot %in% prots_up) %>%
+  inner_join(df_up_cancer_abbrcentroid, by = c('Uniprot' = 'prot')) %>%
+  relocate(cancer_abbr, type, .after = Uniprot)
+df_drug_protein_down <- df_drug_protein %>%
+  filter(Uniprot %in% prots_down) %>%
+  inner_join(df_down_cancer_abbrcentroid, by = c('Uniprot' = 'prot')) %>%
+  relocate(cancer_abbr, type, .after = Uniprot)
+df_drug_protein1 <- rbind(df_drug_protein_up, df_drug_protein_down)
+
+```
+
+### df_tissue_drug
+
+```{r}
+#### perform once
+# d1 <- data.frame(
+#   ProSTEM_tissue = sort(unique(df_tissue_drug$tissue))
+# )
+# d2 <- data.frame(
+#   TPHP_tissue = cancer_abbrs
+# )
+# list(prostem = d1,
+#      tphp = d2) %>%
+#   rio::export('TPHP_ProSTEM_tissue_match.xlsx')
+df_match_tissue <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/TPHP_ProSTEM_tissue_match.xlsx')
+meta <- rio::import('output/T_NT_info_check.xlsx')
+df_match_tissue %<>% rename(anatomical_classification = TPHP_tissue) %>% 
+  mutate(anatomical_classification = ifelse(str_detect(anatomical_classification, 'colon|rectum'), 'large intestine', anatomical_classification)) %>% 
+  distinct() %>% 
+  inner_join(meta %>% distinct(anatomical_classification, class_abbr, cancer, cancer_abbr))
+
+
+df_tissue_drug %<>% rename(ProSTEM_tissue = tissue) %>% 
+  inner_join(df_match_tissue)
+
+
+df_tissue_drug_up <- df_tissue_drug %>%
+  filter(Uniprot %in% prots_up) %>%
+  inner_join(df_up_cancer_abbrcentroid %>%
+               rename(cancer_abbr_list = cancer_abbr) %>% 
+               rename(Uniprot = prot)) %>%
+  # relocate(cancer_abbr, type, .after = Uniprot) %>%
+  filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_tissue_drug_down <- df_tissue_drug %>%
+  filter(Uniprot %in% prots_down) %>%
+  inner_join(df_down_cancer_abbrcentroid %>%
+               rename(cancer_abbr_list = cancer_abbr) %>% 
+               rename(Uniprot = prot)) %>%
+  # relocate(cancer_abbr, type, .after = Uniprot) %>%
+  filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_tissue_drug1 <- rbind(df_tissue_drug_up, df_tissue_drug_down)
+
+
+
+```
+
+### df_crispr_protein
+
+```{r}
+df_crispr_protein_up <- df_crispr_protein %>%
+  filter(Uniprot %in% prots_up) %>%
+  inner_join(df_up_cancer_abbrcentroid %>%
+               mutate(cancer_abbr_list = cancer_abbr) %>% 
+               rename(Uniprot = prot)) %>%
+  relocate(cancer_abbr, type, .after = Uniprot) %>%
+  filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_crispr_protein_down <- df_crispr_protein %>%
+filter(Uniprot %in% prots_down) %>%
+  inner_join(df_down_cancer_abbrcentroid %>%
+               mutate(cancer_abbr_list = cancer_abbr) %>% 
+               rename(Uniprot = prot)) %>%
+  relocate(cancer_abbr, type, .after = Uniprot) %>%
+  filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_crispr_protein1 <- rbind(df_crispr_protein_up, df_crispr_protein_down)
+
+
+
+```
+
+### df_tissue_crispr
+
+```{r}
+#### perform once
+# d1 <- data.frame(
+#   ProSTEM_tissue = sort(unique(df_tissue_drug$tissue))
+# )
+# d2 <- data.frame(
+#   TPHP_tissue = cancer_abbrs
+# )
+# list(prostem = d1,
+#      tphp = d2) %>%
+#   rio::export('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/TPHP_ProSTEM_tissue_match.xlsx')
+df_match_tissue <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/TPHP_ProSTEM_tissue_match.xlsx')
+
+df_tissue_crispr %<>% inner_join(df_match_tissue, by = c('tissue' = 'ProSTEM_tissue')) # many-to-many
+
+
+
+df_tissue_crispr_up <- df_tissue_crispr %>%
+    filter(Uniprot %in% prots_up) %>%
+    inner_join(df_up_cancer_abbrcentroid %>%
+                   rename(cancer_abbr_list = cancer_abbr) %>% 
+                   rename(Uniprot = prot))# %>%
+    # relocate(cancer_abbr, type, .after = Uniprot) %>%
+    # filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_tissue_crispr_down <- df_tissue_crispr %>%
+    filter(Uniprot %in% prots_down) %>%
+    inner_join(df_down_cancer_abbrcentroid %>%
+                   rename(cancer_abbr_list = cancer_abbr) %>% 
+                   rename(Uniprot = prot)) #%>%
+    # relocate(cancer_abbr, type, .after = Uniprot) %>%
+    # filter(str_detect(cancer_abbr_list, cancer_abbr))
+df_tissue_crispr1 <- rbind(df_tissue_crispr_up, df_tissue_crispr_down)
+
+
+
+```
+
+### save
+
+```{r}
+tmp_ls <- list(
+  `All Drug-Protein associations` = df_drug_protein1,
+  `DeeProM Tissue-level Drug` = df_tissue_drug1,
+  `All CRISPR-Protein associations` = df_crispr_protein1,
+  `DeeProM Tissue-level CRISPR` = df_tissue_crispr1
+)
+rio::export(tmp_ls, '//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx')
+
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All Drug-Protein associations')
+df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All CRISPR-Protein associations')
+df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+
+```
+
+
+
+
+# 2.beta/nc_beta \~ fold-change scatter plot for ppi == T
+```{r}
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All Drug-Protein associations')
+df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All CRISPR-Protein associations')
+df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+
+df_dep <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 3)
+df_dep %<>% mutate(
+  type = str_c(direction, 'regulation')
+)
+name1_ls <- split(df_dep, df_dep$cancer_abbr)
+
+
+c_adj_tab <- df_dep %>% select(cancer_abbr, protein, g_adj) %>% rename(Uniprot = protein)
+
+```
+
+## df_drug_protein
+```{r}
+df_drug_protein1 <- df_drug_protein %>%
+  filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta)
+
+df_drug_protein2 <- df_drug_protein1 %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct()
+df_drug_protein2$drug <- str_split(df_drug_protein2$y_id, ';') %>% sapply(function(x) x[2])
+
+
+# add label
+df_drug_protein2 %<>% mutate(label = str_c(drug, cancer_abbr, sep = '_'))
+
+
+df_bar <- df_drug_protein2 %>%
+  filter(
+    nc_beta < -0.1, g_adj > 0.5#, g_adj < 3
+  )
+rio::export(df_bar, 'TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_20251202.xlsx')
+
+length(unique(df_bar$drug)) # 35
+length(unique(df_bar$Uniprot)) # 9
+length(unique(df_bar$cancer_abbr)) # 24
+length(unique(df_bar$drug[df_bar$x_id %in% c('MET', 'EGFR', 'BCL2L1')])) # 24
+length(unique(df_bar$Uniprot[df_bar$x_id %in% c('MET', 'EGFR', 'BCL2L1')])) # 3
+length(unique(df_bar$cancer_abbr[df_bar$x_id %in% c('MET', 'EGFR', 'BCL2L1')])) # 20
+
+x_colors <- c('#1B9E77', '#BC80BD', '#999999', '#1F78B4', '#A6761D', '#FF7F00', '#7CAA2C', '#222222', '#E41A1C'#, '#FDCDAC'
+                       )
+names(x_colors) <- sort(unique(df_bar$x_id))
+
+
+p3 <- ggplot(df_bar, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors)+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+                  data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_20251202.pdf', p3, width = 18, height = 14)
+
+
+
+# bigger
+p3 <- ggplot(df_bar, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 12, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors)+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+                  data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+                  size = 10, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(1, "lines"), point.padding = unit(1.1, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_big1_20251202.pdf', p3, width = 40, height = 30)
+
+
+
+p3 <- ggplot(df_bar, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 12, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors)+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+                  data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+                  size = 6, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_big2_20251202.pdf', p3, width = 40, height = 30)
+
+# splited into two panels
+library(patchwork)
+
+# compute common ranges so panels align vertically
+min(df_bar$g_adj, na.rm = TRUE) # 0.5108996
+x_min <- 0.5
+max(df_bar$g_adj, na.rm = TRUE) # 5.220623
+x_max <- max(df_bar$g_adj, na.rm = TRUE)
+range(df_bar$nc_beta, na.rm = TRUE) # -0.6519208 -0.1294275
+y_range <- c(-0.7, -0.1)
+
+# left panel: g_adj <= 2 (wider)
+p_left <- df_bar %>%
+  filter(g_adj <= 2) %>%
+  ggplot(aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.1, 0.5, 0.5), "cm")  # smaller right margin so panels sit together
+  ) +
+  coord_cartesian(xlim = c(x_min, 2), ylim = y_range, expand = FALSE) +
+  # labels for left panel (more room)
+  geom_text_repel(
+    data = df_bar %>% filter(g_adj <= 2, !str_detect(x_id, 'EGFR|MET|BCL2L1')),
+    aes(label = label),
+    size = 3, max.overlaps = 40, min.segment.length = 0,
+    box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+    segment.color = "black", show.legend = FALSE
+  )
+
+# right panel: g_adj > 2 (narrower)
+p_right <- df_bar %>%
+  filter(g_adj > 2) %>%
+  ggplot(aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = NULL, title = "") +   # hide redundant y label
+  scale_colour_manual('Target', values = x_colors) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.position = "none",  # hide duplicate legend on narrow panel
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.1), "cm")
+  ) +
+  coord_cartesian(xlim = c(2, x_max), ylim = y_range, expand = FALSE) +
+  # labels for right panel (fewer or adjusted)
+  geom_text_repel(
+    data = df_bar %>% filter(g_adj > 2, !str_detect(x_id, 'EGFR|MET|BCL2L1')),
+    aes(label = label),
+    size = 3, max.overlaps = 20, min.segment.length = 0,
+    box.padding = unit(0.3, "lines"), point.padding = unit(0.4, "lines"),
+    segment.color = "black", show.legend = FALSE
+  )
+
+# combine with patchwork: left wider than right
+p3_combined <- p_left + p_right + plot_layout(widths = c(5, 1))
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_splited_20251202.pdf', p3_combined, width = 26, height = 14)
+
+
+# # remove some scatters bigger
+# p4 <- ggplot(df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)), aes(x = g_adj, y = nc_beta, color = x_id)) +
+#   geom_point(alpha = 0.8, size = 12, shape = 16) +
+#   # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+#   # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+#   # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+#   geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+#   labs(x = "adj.g", y = "nc_beta", title = "") +
+#   scale_colour_manual('Target', values = x_colors)+
+#   theme_bw() +
+#   theme(
+#     axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+#     plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+#     legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+#     plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+#   ) +
+#   geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+#                   # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+#                   # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+#                   data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+#                   size = 10, max.overlaps = 40,
+#                   min.segment.length = 0,
+#                   box.padding = unit(1, "lines"), point.padding = unit(1.1, "lines"),
+#                   segment.color = "black", show.legend = FALSE
+#   )
+# #no warning
+# ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_remove_EGFR_MET_BCL2L1_big1_20251202.pdf', p4, width = 40, height = 30)
+# 
+# 
+# 
+# p4 <- ggplot(df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)), aes(x = g_adj, y = nc_beta, color = x_id)) +
+#   geom_point(alpha = 0.8, size = 12, shape = 16) +
+#   # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+#   # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+#   # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+#   geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+#   labs(x = "adj.g", y = "nc_beta", title = "") +
+#   scale_colour_manual('Target', values = x_colors)+
+#   theme_bw() +
+#   theme(
+#     axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+#     plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+#     legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+#     plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+#   ) +
+#   geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+#                   # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+#                   # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+#                   data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+#                   size = 6, max.overlaps = 40,
+#                   min.segment.length = 0,
+#                   box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+#                   segment.color = "black", show.legend = FALSE
+#   )
+# #no warning
+# ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_remove_EGFR_MET_BCL2L1_big2_20251202.pdf', p4, width = 40, height = 30)
+
+
+
+# all
+p_all <- ggplot(df_bar, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 0.5, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors)+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+                  data = df_bar,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.3, "lines"), point.padding = unit(0.4, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_all_20251202.pdf', p_all, width = 40, height = 40)
+
+
+
+
+
+# not filtering g_adj and nc_beta
+df_bar <- df_drug_protein2
+x_colors <- c('#1B9E77', '#BC80BD', '#999999', '#1F78B4', '#A6761D', '#FF7F00', '#7CAA2C', '#222222', '#E41A1C', '#13CD32', '#FDCDAC'
+                       )
+names(x_colors) <- sort(unique(df_bar$x_id))
+
+
+p3 <- ggplot(df_bar, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  scale_colour_manual('Target', values = x_colors)+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = label),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  # data = df_bar %>% filter(str_detect(cancer_abbr, 'uterus|LN|lung|rectum|mammary gland|ovary|fallopian tube'), nc_beta < -0.3),
+                  data = df_bar %>% filter(str_detect(x_id, 'EGFR|MET|BCL2L1', negate = T)),
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_20251202_notfilter_effect_ncbeta.pdf', p3, width = 18, height = 14)
+
+```
+
+
+### read results of DEA
+```{r}
+# df_dea <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/diff_expr/20230318_TPHP_dysregulated_proteins_filter50NABycancer_abbr.xlsx')
+# df_dea[str_detect(df_dea$cancer_abbr, 'cervi'), 'cancer_abbr'] <- 'cervix uteri'
+# 
+# #get abbreviations
+# df_abbr <- read.delim('//192.168.99.100/share/members/jiangwenhao/TPHP/input/sample_types_abbr_20230113.txt', stringsAsFactors = F, check.names = F, na.strings = '')
+# h <- hash::hash(keys = df_abbr$'Entire', values = df_abbr$'Abbr')
+# df_dea$cancer_abbr <- sapply(df_dea$cancer_abbr, function(e) ifelse(!is.null(h[[tolower(e)]]), h[[tolower(e)]], e))
+# 
+# 
+# # CHANGE TO CANCER NAME
+# ht_cancer_abbr2cancer <- c('GBM', 'COCA', 'CESC', 'ESCA', 'FTCA', 'GBCA', 'RC', 'HCC', 'DLBCL', 'THYM', 'LUCA', 'BRCA', 'MUT', 'OC', 'PACA', 'PECA', 'PRCA', 'READ', 'GIST', 'GC', 'TGCT', 'LARCA', 'THCA', 'TOCA', 'ENCA')
+# names(ht_cancer_abbr2cancer) <- c('CE', 'CO', 'CU', 'ESO', 'FT', 'GB', 'KI', 'LI', 'LN', 'LTH', 'LU', 'MAG', 'MU', 'OV', 'PA', 'PEN', 'PR', 'REC', 'SI', 'ST', 'TE', 'THR', 'THY', 'TON', 'UTE')
+# df_dea$cancer_abbr <- ht_cancer_abbr2cancer[df_dea$cancer_abbr]
+
+df_dea <- df_up_down %>% rename(Uniprot = prot)
+
+```
+
+### MET only
+```{r}
+df_bar_MET <- df_bar %>% filter(x_id == 'MET') %>%
+  left_join(df_dea)
+
+df_bar_MET1 <- df_bar_MET %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta) %>% filter(g_adj > 0.5)
+
+ggplot(df_bar_MET1, aes(x = cancer_abbr, y = drug, size = -log10(p_adj_BH), color = g_adj)) +
+  geom_point(alpha = 1) +
+  scale_color_gradientn(values = seq(0, 2, 0.2),
+                        colors = colorRampPalette(colors = c("#FDAE61", "#F46D43", "#D73027"))(90)) +
+  scale_size(range = c(3, 7), name = "-log10(p_adj_BH)") +
+  labs(
+    x = 'Cancer name',
+    y = 'Drug name'
+  )+
+  #theme_bw()+
+  theme(panel.grid = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.line = element_line(color = 'black'),
+        #axis.line.x = element_blank(),
+        #axis.line.y = element_blank(),
+        plot.subtitle = element_text(size = 30, hjust = 0, color = 'black')
+  )+
+  theme(strip.text.x = element_text(size = 10, colour = "black"),
+        legend.text = element_text(size = 12, color = 'black'), legend.position = 'right',
+        legend.title = element_text(size = 15, color = 'black'))+
+  theme(axis.title.x = element_text(size = 12, hjust = 0.5, color = 'black', angle = 0),
+        axis.text.x = element_text(size = 12, vjust = 0.5 ,color = 'black', angle = 0),
+        # axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+  )+
+  theme(axis.title.y = element_text(size = 12, hjust = 0.5, color = 'black', angle = 90),
+        axis.text.y = element_text(size = 10,color = 'black', angle = 0),
+        axis.ticks.y = element_blank()
+  )
+
+
+x1 <- min(df_bar_MET1$g_adj)
+x2 <- max(df_bar_MET1$g_adj)
+y1 <- min(df_bar_MET1$nc_beta)
+y2 <- max(df_bar_MET1$nc_beta)
+
+df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pMET <- ggplot(df_bar_tmp %>% filter(x_id == 'MET'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 8, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "MET") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'MET'),
+                  # data = df_bar_MET1,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_MET_20251202.pdf', pMET, width = 9, height = 7)
+
+```
+
+### EGFR only
+```{r}
+df_bar_EGFR <- df_bar %>% filter(x_id == 'EGFR') %>%
+  left_join(df_dea)
+
+df_bar_EGFR1 <- df_bar_EGFR %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta) %>% filter(g_adj > 0.5)
+
+ggplot(df_bar_EGFR1, aes(x = cancer_abbr, y = drug, size = -log10(p_adj_BH), color = g_adj)) +
+  geom_point(alpha = 1) +
+  scale_color_gradientn(values = seq(0, 2, 0.2),
+                        colors = colorRampPalette(colors = c("#FDAE61", "#F46D43", "#D73027"))(90)) +
+  scale_size(range = c(3, 7), name = "-log10(p_adj_BH)") +
+  labs(
+    x = 'Cancer name',
+    y = 'Drug name'
+  )+
+  #theme_bw()+
+  theme(panel.grid = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.line = element_line(color = 'black'),
+        #axis.line.x = element_blank(),
+        #axis.line.y = element_blank(),
+        plot.subtitle = element_text(size = 30, hjust = 0, color = 'black')
+  )+
+  theme(strip.text.x = element_text(size = 10, colour = "black"),
+        legend.text = element_text(size = 12, color = 'black'), legend.position = 'right',
+        legend.title = element_text(size = 15, color = 'black'))+
+  theme(axis.title.x = element_text(size = 12, hjust = 0.5, color = 'black', angle = 0),
+        axis.text.x = element_text(size = 12, vjust = 0.5 ,color = 'black', angle = 0),
+        # axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+  )+
+  theme(axis.title.y = element_text(size = 12, hjust = 0.5, color = 'black', angle = 90),
+        axis.text.y = element_text(size = 10,color = 'black', angle = 0),
+        axis.ticks.y = element_blank()
+  )
+
+
+x1 <- min(df_bar_EGFR1$g_adj)
+x2 <- max(df_bar_EGFR1$g_adj)
+y1 <- min(df_bar_EGFR1$nc_beta)
+y2 <- max(df_bar_EGFR1$nc_beta)
+
+df_bar_tmp <- df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pEGFR <- ggplot(df_bar_tmp %>% filter(x_id == 'EGFR'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 6, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "EGFR") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'EGFR'),
+                  # data = df_bar_EGFR1,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_EGFR_20251202.pdf', pEGFR, width = 12, height = 9)
+
+```
+
+
+
+
+
+### BCL2L1 only
+```{r}
+df_bar_BCL2L1 <- df_bar %>% filter(x_id == 'BCL2L1') %>%
+  left_join(df_dea)
+
+df_bar_BCL2L11 <- df_bar_BCL2L1 %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta) %>% filter(g_adj > 0.5)
+
+ggplot(df_bar_BCL2L11, aes(x = cancer_abbr, y = drug, size = -log10(p_adj_BH), color = g_adj)) +
+  geom_point(alpha = 1) +
+  scale_color_gradientn(values = seq(0, 2, 0.2),
+                        colors = colorRampPalette(colors = c("#FDAE61", "#F46D43", "#D73027"))(90)) +
+  scale_size(range = c(3, 7), name = "-log10(p_adj_BH)") +
+  labs(
+    x = 'Cancer name',
+    y = 'Drug name'
+  )+
+  #theme_bw()+
+  theme(panel.grid = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.line = element_line(color = 'black'),
+        #axis.line.x = element_blank(),
+        #axis.line.y = element_blank(),
+        plot.subtitle = element_text(size = 30, hjust = 0, color = 'black')
+  )+
+  theme(strip.text.x = element_text(size = 10, colour = "black"),
+        legend.text = element_text(size = 12, color = 'black'), legend.position = 'right',
+        legend.title = element_text(size = 15, color = 'black'))+
+  theme(axis.title.x = element_text(size = 12, hjust = 0.5, color = 'black', angle = 0),
+        axis.text.x = element_text(size = 12, vjust = 0.5 ,color = 'black', angle = 0),
+        # axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+  )+
+  theme(axis.title.y = element_text(size = 12, hjust = 0.5, color = 'black', angle = 90),
+        axis.text.y = element_text(size = 10,color = 'black', angle = 0),
+        axis.ticks.y = element_blank()
+  )
+
+
+x1 <- min(df_bar_BCL2L11$g_adj)
+x2 <- max(df_bar_BCL2L11$g_adj)
+y1 <- min(df_bar_BCL2L11$nc_beta)
+y2 <- max(df_bar_BCL2L11$nc_beta)
+
+df_bar_tmp <- df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pBCL2L1 <- ggplot(df_bar_tmp %>% filter(x_id == 'BCL2L1'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 6, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "BCL2L1") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'BCL2L1'),
+                  # data = df_bar_BCL2L11,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_BCL2L1_20251202.pdf', pBCL2L1, width = 12, height = 9)
+
+
+# remove_drug_names in labels
+pBCL2L1_rdns <- ggplot(df_bar_tmp %>% filter(x_id == 'BCL2L1'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 6, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "BCL2L1") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(cancer_abbr)),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'BCL2L1'),
+                  # data = df_bar_BCL2L11,
+                  size = 5, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_BCL2L1_remove_drug_names_20251202.pdf', pBCL2L1_rdns, width = 12, height = 9)
+
+
+```
+
+### MET+EGFR+BCL2L1
+BRCA, ENCA only
+```{r}
+
+
+
+```
+
+
+
+## df_crispr_protein
+```{r}
+df_crispr_protein1 <- df_crispr_protein %>%
+  filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta)
+
+df_crispr_protein2 <- df_crispr_protein1 %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct() # many-to-many
+
+# #get abbreviations
+# df_abbr <- read.delim('//192.168.99.100/share/members/jiangwenhao/TPHP/input/sample_types_abbr_20230113.txt', stringsAsFactors = F, check.names = F, na.strings = '')
+# h <- hash::hash(keys = df_abbr$'Entire', values = df_abbr$'Abbr')
+# df_crispr_protein2$cancer_abbr <- sapply(df_crispr_protein2$cancer_abbr, function(e) ifelse(!is.null(h[[tolower(e)]]), h[[tolower(e)]], e))
+# 
+# 
+# # CHANGE TO CANCER NAME
+# ht_cancer_abbr2cancer <- c('GBM', 'COCA', 'CESC', 'ESCA', 'FTCA', 'GBCA', 'RC', 'HCC', 'DLBCL', 'THYM', 'LUCA', 'BRCA', 'MUT', 'OC', 'PACA', 'PECA', 'PRCA', 'READ', 'GIST', 'GC', 'TGCT', 'LARCA', 'THCA', 'TOCA', 'ENCA')
+# names(ht_cancer_abbr2cancer) <- c('CE', 'CO', 'CU', 'ESO', 'FT', 'GB', 'KI', 'LI', 'LN', 'LTH', 'LU', 'MAG', 'MU', 'OV', 'PA', 'PEN', 'PR', 'REC', 'SI', 'ST', 'TE', 'THR', 'THY', 'TON', 'UTE')
+# df_crispr_protein2$cancer_abbr <- ht_cancer_abbr2cancer[df_crispr_protein2$cancer_abbr]
+
+
+df_crispr_protein2 %<>% mutate(label = str_c(x_id, cancer_abbr, sep = '_'))
+
+df_crispr_protein2 %>% filter(x_id %in% c('MET', 'EGFR', 'PARP1'))
+# # A tibble: 10 x 8
+#    y_id  x_id  Uniprot    beta nc_beta cancer_abbr g_adj label    
+#    <chr> <chr> <chr>     <dbl>   <dbl> <chr>       <dbl> <chr>    
+#  1 MET   MET   P08581  -0.0824  -0.116 COCA         1.36 MET_COCA 
+#  2 MET   MET   P08581  -0.0824  -0.116 LUCA         2.13 MET_LUCA 
+#  3 MET   MET   P08581  -0.0824  -0.116 PACA         1.66 MET_PACA 
+#  4 MET   MET   P08581  -0.0824  -0.116 RC           2.60 MET_RC   
+#  5 MET   MET   P08581  -0.0824  -0.116 READ         1.76 MET_READ 
+#  6 EGFR  EGFR  P00533  -0.0129  -0.138 ENCA        -1.22 EGFR_ENCA
+#  7 EGFR  EGFR  P00533  -0.0129  -0.138 GC          -1.11 EGFR_GC  
+#  8 EGFR  EGFR  P00533  -0.0129  -0.138 READ        -1.06 EGFR_READ
+#  9 EGFR  EGFR  P00533  -0.0129  -0.138 TGCT        -1.83 EGFR_TGCT
+# 10 EGFR  EGFR  P00533  -0.0129  -0.138 TOCA         2.72 EGFR_TOCA
+
+# # A tibble: 11 × 8 (version V20230220)
+#    y_id  x_id  Uniprot    beta nc_beta cancer_abbr    g_adj label     
+#    <chr> <chr> <chr>     <dbl>   <dbl> <chr> <dbl> <chr>     
+#  1 MET   MET   P08581  -0.0824  -0.116 LUCA   1.27 MET_LUCA  
+#  2 MET   MET   P08581  -0.0824  -0.116 DLBCL  1.31 MET_DLBCL 
+#  3 MET   MET   P08581  -0.0824  -0.116 PACA   1.94 MET_PACA  
+#  4 MET   MET   P08581  -0.0824  -0.116 READ   2.19 MET_READ  
+#  5 EGFR  EGFR  P00533  -0.0129  -0.138 GBM    3.16 EGFR_GBM  
+#  6 EGFR  EGFR  P00533  -0.0129  -0.138 CESC   1.77 EGFR_CESC 
+#  7 EGFR  EGFR  P00533  -0.0129  -0.138 PACA   1.07 EGFR_PACA 
+#  8 EGFR  EGFR  P00533  -0.0129  -0.138 PECA   1.47 EGFR_PECA 
+#  9 EGFR  EGFR  P00533  -0.0129  -0.138 TGCT  -1.22 EGFR_TGCT 
+# 10 EGFR  EGFR  P00533  -0.0129  -0.138 LARCA  1.41 EGFR_LARCA
+# 11 EGFR  EGFR  P00533  -0.0129  -0.138 TOCA   1.22 EGFR_TOCA 
+
+df_crispr_protein2 %<>% filter(nc_beta < -0.1, nc_beta > -0.2, g_adj > 0.5) # 根据图片结果选取范围
+
+
+p1 <- ggplot(df_crispr_protein2, aes(x = g_adj, y = beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "beta", title = "") +
+  guides(color=guide_legend("Target"))+
+  # scale_colour_manual('Target', palette = "Set2")+
+  scale_colour_manual(values = x_colors[c('MET', 'EGFR')]) + 
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = beta, label = cancer_abbr),
+                  data = df_crispr_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  size = 3, max.overlaps = 150,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+
+p2 <- ggplot(df_crispr_protein2, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  guides(color=guide_legend("Target"))+
+  # scale_colour_manual('Target', palette = "Set2")+
+  scale_colour_manual(values = x_colors[c('MET', 'EGFR')]) + 
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = beta, label = cancer_abbr),
+                  data = df_crispr_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  size = 3, max.overlaps = 150,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+ggsave('TPHP_ProSTEM_CRISPR_protein_associations_effect_beta_20251202.pdf', p1, width = 14, height = 10)
+ggsave('TPHP_ProSTEM_CRISPR_protein_associations_effect_ncbeta_20251202.pdf', p2, width = 7, height = 5)
+
+
+df_crispr_protein2 %>% filter(x_id %in% c('MET', 'EGFR')) %>% arrange(nc_beta, g_adj)
+# # A tibble: 6 x 8
+#   y_id  x_id  Uniprot    beta nc_beta cancer_abbr g_adj label    
+#   <chr> <chr> <chr>     <dbl>   <dbl> <chr>       <dbl> <chr>    
+# 1 EGFR  EGFR  P00533  -0.0129  -0.138 TOCA         2.72 EGFR_TOCA
+# 2 MET   MET   P08581  -0.0824  -0.116 COCA         1.36 MET_COCA 
+# 3 MET   MET   P08581  -0.0824  -0.116 PACA         1.66 MET_PACA 
+# 4 MET   MET   P08581  -0.0824  -0.116 READ         1.76 MET_READ 
+# 5 MET   MET   P08581  -0.0824  -0.116 LUCA         2.13 MET_LUCA 
+# 6 MET   MET   P08581  -0.0824  -0.116 RC           2.60 MET_RC   
+
+# # A tibble: 10 × 8 (Version 202302)
+#    y_id  x_id  Uniprot    beta nc_beta cancer_abbr    g_adj label     
+#    <chr> <chr> <chr>     <dbl>   <dbl> <chr> <dbl> <chr>     
+#  1 EGFR  EGFR  P00533  -0.0129  -0.138 PACA   1.07 EGFR_PACA 
+#  2 EGFR  EGFR  P00533  -0.0129  -0.138 TOCA   1.22 EGFR_TOCA 
+#  3 EGFR  EGFR  P00533  -0.0129  -0.138 LARCA  1.41 EGFR_LARCA
+#  4 EGFR  EGFR  P00533  -0.0129  -0.138 PECA   1.47 EGFR_PECA 
+#  5 EGFR  EGFR  P00533  -0.0129  -0.138 CESC   1.77 EGFR_CESC 
+#  6 EGFR  EGFR  P00533  -0.0129  -0.138 GBM    3.16 EGFR_GBM  
+#  7 MET   MET   P08581  -0.0824  -0.116 LUCA   1.27 MET_LUCA  
+#  8 MET   MET   P08581  -0.0824  -0.116 DLBCL  1.31 MET_DLBCL 
+#  9 MET   MET   P08581  -0.0824  -0.116 PACA   1.94 MET_PACA  
+# 10 MET   MET   P08581  -0.0824  -0.116 READ   2.19 MET_READ 
+
+
+
+p2 <- ggplot(df_crispr_protein2, aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 3.5, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "adj.g", y = "nc_beta", title = "") +
+  guides(color=guide_legend("Target"))+
+  # scale_colour_manual('Target', palette = "Set2")+
+  scale_colour_manual(values = x_colors[c('MET', 'EGFR')]) + 
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) #+
+  # geom_text_repel(aes(x = g_adj, y = beta, label = cancer_abbr),
+  #                 data = df_crispr_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+  #                 size = 3, max.overlaps = 150,
+  #                 box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+  #                 segment.color = "black", show.legend = FALSE
+  # )
+
+ggsave('TPHP_ProSTEM_CRISPR_protein_associations_effect_ncbeta_clean_20251202.pdf', p2, width = 7, height = 5)
+
+```
+
+
+
+
+## df_tissue_drug
+```{r}
+df_tissue_drug %>%
+  filter(ppi == 'T') # nrow == 0
+
+
+```
+
+
+## df_tissue_crispr
+```{r}
+df_tissue_crispr %>%
+  filter(ppi == 'T') # nrow == 0
+
+```
+
+
+
+
+## output
+```{r}
+list(drug = df_drug_protein2, CRISPR = df_crispr_protein2) %>%
+  rio::export('TPHP_ProSTEM_data_20251202.xlsx')
+
+
+```
+
+
+
+# 3.Commonly upregulated proteins in ProSTEM
+```{r}
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All Drug-Protein associations')
+df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All CRISPR-Protein associations')
+df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+
+
+# up_down15 <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/diff_expr/TPHP_DEP_up_atleast12_cancer_abbr_20230318.xlsx')
+# up_down15$prot
+prot_meta <- rio::import('T_NT_shared_DEP_1_22.xlsx')
+df_dep <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 3)
+df_dep %<>% mutate(
+  type = str_c(direction, 'regulation')
+)
+sharen.cutoff <- 15
+
+up_down15 <- df_dep %>%
+  filter(protein %in% (prot_meta %>% filter(sharing_n >= sharen.cutoff) %>% pull(protein))) %>% 
+  mutate(label = str_c(Genes, '_', protein)) %>% 
+  pivot_wider(id_cols = c(protein, label), names_from = cancer_abbr, values_from = g_adj) %>% 
+  rename(prot = protein)
+
+up_down15_allCripr <- df_crispr_protein %>% filter(Uniprot %in% up_down15$prot)
+up_down15_tissueCripr <- df_tissue_crispr %>% filter(Uniprot %in% up_down15$prot)
+
+X <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/1-s2.0-S1535610822002744-mmc6.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+X %<>% setNames(.[1, ]) %>% slice(-1)
+X%<>% set_coltype_num
+X2 <- X %>% left_join(df_gene) %>% filter(Uniprot %in% up_down15$prot)
+
+cancer_stat <- up_down15 %>% select(-label) %>% 
+  pivot_longer(cols = -prot, values_drop_na = T) %>% 
+  group_by(prot) %>% 
+  summarise(UpregulatedCancer = str_c(sort(name), collapse = ';'))
+tissueCrispr_all <- X2 %>% arrange(x_id) %>% relocate(Uniprot, .after = x_id) %>% 
+  left_join(cancer_stat %>% rename(Uniprot = prot))
+
+# tissueCrispr_fdr <- up_down15_tissueCripr %>% arrange(x_id)
+tissueCrispr_fdr <- tissueCrispr_all %>% filter((fdr < 0.01 | nc_fdr < 0.01), (abs(beta) > 0.1 | abs(nc_beta) > 0.1))
+
+
+
+list(tissueCrispr_all = tissueCrispr_all,
+     tissueCrispr_fdr = tissueCrispr_fdr) %>%
+  rio::export('TPHP_up_down15_prot_DeePRoM_CRISPR.xlsx')
+
+
+```
+
+
+## All ppi
+```{r}
+df_drug_protein3 <- df_drug_protein %>%
+  # filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta, target, ppi) %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct() %>% 
+  mutate(
+    drug = str_split(y_id, ';') %>% sapply(function(x) x[2]),
+    label = str_c(drug, cancer_abbr, sep = '_')
+  )
+
+df_crispr_protein3 <- df_crispr_protein %>%
+  # filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta) %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct() %>%  # many-to-many
+  mutate(label = str_c(x_id, cancer_abbr, sep = '_'))
+
+df_tissue_drug3 <- df_tissue_drug %>%
+  select(drug_name, x_id, Uniprot, ProSTEM_tissue, cancer_abbr, cancer_abbr_list, beta, nc_beta, target, ppi) %>% 
+  inner_join(c_adj_tab) %>%
+  distinct()
+
+df_tissue_crispr3 <- df_tissue_crispr %>%
+  select(Gene, x_id, Uniprot, tissue, cancer_abbr, cancer_abbr_list, beta, nc_beta) %>% 
+  rename(ProSTEM_tissue = tissue) %>% 
+  inner_join(c_adj_tab) %>%
+  distinct()
+
+
+list(Drug = df_drug_protein3, CRISPR = df_crispr_protein3,
+     Drug.tissue = df_tissue_drug3, CRISPR.tissue = df_tissue_crispr3) %>%
+  rio::export('TPHP_DEP_ProSTEM_all_ppi_20251202.xlsx')
+
+```
+
+## common DEPs
+```{r}
+DEP.common.pathway <- readRDS('common_DEP_bubble_plot.rds')
+DEP.common.pathway.rna <- DEP.common.pathway %>% plyr::ldply(.id = 'Dataset') %>% 
+  filter(str_detect(Description, 'transcription|RNA'),
+         generality >= 10)
+DEP.common.pathway.rna.split <- split(unique(unlist(DEP.common.pathway.rna$protein.list)), DEP.common.pathway.rna$Description)
+
+canditar.rna <- unique(unlist(DEP.common.pathway.rna$protein.list)) # target candidates
+df.canditar.rna <- plyr::ldply(DEP.common.pathway.rna.split, .id = 'Description', function(x) data.frame(Uniprot = x)) %>%
+  inner_join(DEP.common.pathway.rna %>% select(-protein.list, -label))
+
+# rio::export(tmp, 'common15_DEP_GOBP_KEGG_RNA.xlsx')
+
+
+list(
+  Drug = df_drug_protein3 %>% filter(Uniprot %in% canditar.rna) %>%
+    inner_join(df.canditar.rna),
+  CRISPR = df_crispr_protein3 %>% filter(Uniprot %in% canditar.rna) %>%
+    inner_join(df.canditar.rna),
+  Drug.tissue = df_tissue_drug3 %>% filter(Uniprot %in% canditar.rna) %>%
+    inner_join(df.canditar.rna),
+  CRISPR.tissue = df_tissue_crispr3 %>% filter(Uniprot %in% canditar.rna) %>%
+    inner_join(df.canditar.rna)
+) %>%
+  rio::export('TPHP_DEP_ProSTEM_all_ppi_common_pro15_pathway10_20251202.xlsx')
+
+```
+
+### draw scatters
+```{r}
+df_dep <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 3)
+df_dep %<>% mutate(
+  type = str_c(direction, 'regulation')
+)
+
+
+Drug <- rio::import('TPHP_DEP_ProSTEM_all_ppi_common_pro15_pathway10_20251202.xlsx', sheet = 1)
+CRISPR <- rio::import('TPHP_DEP_ProSTEM_all_ppi_common_pro15_pathway10_20251202.xlsx', sheet = 2)
+Drug.tissue <- rio::import('TPHP_DEP_ProSTEM_all_ppi_common_pro15_pathway10_20251202.xlsx', sheet = 3)
+CRISPR.tissue <- rio::import('TPHP_DEP_ProSTEM_all_ppi_common_pro15_pathway10_20251202.xlsx', sheet = 4)
+
+# Drug %<>% filter(nc_beta < 0)
+# CRISPR %<>% filter(nc_beta < 0)
+# Drug.tissue %<>% filter(nc_beta < 0)
+# CRISPR.tissue %<>% filter(nc_beta < 0)
+
+df_scatter1 <- CRISPR.tissue
+df_scatter2 <- CRISPR %>% semi_join(CRISPR.tissue %>% distinct(x_id, Uniprot, cancer_abbr)) %>%
+  # mutate(Genes = y_id) %>% # Target should be mapped too
+  # inner_join(df_dep %>% filter(g_adj > 0) %>% # up-regulate
+  #              distinct(cancer_abbr, Genes, protein) %>%
+  #              rename(KO.protein = protein) %>% drop_na()) %>% 
+  mutate(ProSTEM_tissue = 'Pancancer',
+         Gene = y_id)
+
+tbl.scatter.crispr <- df_scatter <- plyr::rbind.fill(df_scatter1, df_scatter2) %>%
+  filter(nc_beta < 0, g_adj > 0)
+# df_scatter %<>% distinct(y_id, x_id, Uniprot, nc_beta, target, cancer_abbr, g_adj, Description)
+df_scatter_filter <- df_scatter %>% filter(nc_beta < -0.35)
+
+scatter.crispr <- ggplot(df_scatter, aes(x = g_adj, y = nc_beta, fill = cancer_abbr)) +
+  facet_wrap(~ Description, scales = "free", ncol = 4) +
+  # Points: fillable shape with thin neutral outline; light jitter to reduce overlap
+  geom_point(
+    alpha    = 0.55,
+    size     = 3.5,
+    shape    = 21,                                # fill + stroke (Code2 style)
+    colour   = "grey25",                          # fixed outline color
+    stroke   = 0.25,
+    position = position_jitter(width = 0.15,# height = 0.25,
+                               seed = 42)
+  ) +
+  # Reference lines: keep 0.5 as lighter guides
+  # geom_vline(xintercept = 0,  linetype = "dashed", colour = "grey60") +
+  geom_hline(yintercept = -0.1,  linetype = "dotted", colour = "grey60") +
+  geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey75") +
+  # Axis labels and titles reflect your definitions
+  labs(
+    x        = "Hedges' g (covariates adjusted)",
+    y        = "Coefficient without transcriptomics covariates\n(nc_beta)",
+    title    = "",
+    subtitle = ""
+  ) +
+  # scale_fill_manual(values = cancer_color) +
+  scale_fill_npg() +
+  guides(fill = guide_legend("Cancer")) +
+  # Readable ticks
+  scale_x_continuous(breaks = scales::pretty_breaks()) +
+  scale_y_continuous(breaks = scales::pretty_breaks()) +
+  # coord_cartesian(
+  #   xlim = c(0, max(df_scatter$g_adj, na.rm = TRUE)),
+  #   ylim = c(min(df_scatter$nc_beta, na.rm = TRUE), 0)
+  # ) +
+  theme_bw() +
+  theme(
+    text    = element_text(size = 10),
+    # plot.margin  = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  # Labels: same jitter as points; always draw short leader lines; keep legend clean
+  ggrepel::geom_text_repel(
+    aes(x = g_adj, y = nc_beta, label = paste0(x_id, "_", Gene, ".KO")),
+    data               = df_scatter_filter,
+    size               = 2,
+    # position           = position_jitter(width = 0.25,# height = 0.25,
+    #                                      seed = 42),
+    min.segment.length = 0,
+    segment.size       = 0.25,
+    segment.color      = "grey30",
+    segment.alpha      = 0.8,
+    max.overlaps       = Inf,
+    show.legend        = FALSE
+  )
+ggsave('Tumor_common_RNA_pathways_ProSTEM_CRISPR_ncbeta_scatters_20251104.pdf', scatter.crispr, width = 8, height = 4)
+
+
+
+df_scatter1 <- Drug.tissue
+df_scatter2 <- Drug %>% semi_join(CRISPR.tissue %>% distinct(x_id, Uniprot, cancer_abbr)) %>%
+  # mutate(Genes = target) %>% # Target should be mapped too, particularly for ppi > 1
+  # separate_rows(Genes, sep = ';') %>% # some target is a gene.list
+  # inner_join(df_dep %>% filter(g_adj > 0) %>% # up-regulate
+  #              distinct(cancer_abbr, Genes, protein) %>%
+  #              rename(Targetted.protein = protein) %>% drop_na()) %>% 
+  mutate(ProSTEM_tissue = 'Pancancer')
+
+tbl.scatter.drug <- df_scatter <- plyr::rbind.fill(df_scatter1, df_scatter2) %>%
+  filter(nc_beta < 0, g_adj > 0)
+# df_scatter %<>% distinct(y_id, x_id, Uniprot, nc_beta, target, cancer_abbr, g_adj, Description)
+df_scatter_filter <- df_scatter %>% filter(nc_beta < -0.35)
+
+scatter.drug <- ggplot(df_scatter, aes(x = g_adj, y = nc_beta, fill = cancer_abbr)) +
+  facet_wrap(~ Description, scales = "free", ncol = 4) +
+  # Points: fillable shape with thin neutral outline; light jitter to reduce overlap
+  geom_point(
+    alpha    = 0.55,
+    size     = 3.5,
+    shape    = 21,                                # fill + stroke (Code2 style)
+    colour   = "grey25",                          # fixed outline color
+    stroke   = 0.25,
+    position = position_jitter(width = 0.1,# height = 0.25,
+                               seed = 42)
+  ) +
+  # Reference lines: keep 0.5 as lighter guides
+  # geom_vline(xintercept = 0,  linetype = "dashed", colour = "grey60") +
+  geom_hline(yintercept = -0.1,  linetype = "dotted", colour = "grey60") +
+  geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey75") +
+  # Axis labels and titles reflect your definitions
+  labs(
+    x        = "Hedges' g (covariates adjusted)",
+    y        = "Coefficient without transcriptomics covariates\n(nc_beta)",
+    title    = "",
+    subtitle = ""
+  ) +
+  # scale_fill_manual(values = cancer_color) +
+  scale_fill_npg() +
+  guides(fill = guide_legend("Cancer")) +
+  # Readable ticks
+  scale_x_continuous(breaks = scales::pretty_breaks()) +
+  scale_y_continuous(breaks = scales::pretty_breaks()) +
+  # coord_cartesian(
+  #   xlim = c(0, max(df_scatter$g_adj, na.rm = TRUE)),
+  #   ylim = c(min(df_scatter$nc_beta, na.rm = TRUE), 0)
+  # ) +
+  theme_bw() +
+  theme(
+    text    = element_text(size = 10),
+    # plot.margin  = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  # Labels: same jitter as points; always draw short leader lines; keep legend clean
+  ggrepel::geom_text_repel(
+    aes(x = g_adj, y = nc_beta, label = paste0(x_id, "_", drug)),
+    data               = df_scatter_filter,
+    size               = 2,
+    # position           = position_jitter(width = 0.25,# height = 0.25,
+    #                                      seed = 42),
+    min.segment.length = 0,
+    segment.size       = 0.25,
+    segment.color      = "grey30",
+    segment.alpha      = 0.8,
+    max.overlaps       = Inf,
+    show.legend        = FALSE
+  )
+ggsave('Tumor_common_RNA_pathways_ProSTEM_Drug_ncbeta_scatters_20251104.pdf', scatter.drug, width = 10, height = 5)
+
+list(Drug.Association = tbl.scatter.drug,
+     CRIPSR.Association = tbl.scatter.crispr) %>% 
+  rio::export('Tumor_common_RNA_pathways_ProSTEM_Drug_CRISPR_scatters_20251104.xlsx')
+
+```
+
+
+### draw scatters v2
+#### CRISPR (figures not used)
+```{r}
+df_scatter1 <- CRISPR.tissue
+df_scatter2 <- CRISPR %>%
+  semi_join(
+    CRISPR.tissue %>% distinct(Gene, x_id) %>% 
+      rename(y_id = Gene)
+  ) %>%
+  # mutate(Genes = y_id) %>% # Target should be mapped too
+  # inner_join(df_dep %>% filter(g_adj > 0) %>% # up-regulate
+  #              distinct(cancer_abbr, Genes, protein) %>%
+  #              rename(KO.protein = protein) %>% drop_na()) %>% 
+  mutate(ProSTEM_tissue = 'Pancancer',
+         cancer_abbr = 'Pancancer', # for scatter plot
+         Gene = y_id) %>% 
+  relocate(ProSTEM_tissue, .before = cancer_abbr)
+
+tbl.scatter.crispr <- df_scatter <- plyr::rbind.fill(df_scatter1, df_scatter2) %>%
+  filter(nc_beta < 0, g_adj > 0) %>% 
+  mutate(cancer_abbr = factor(cancer_abbr, levels = unique(c('Pancancer', sort(cancer_abbr)))))
+# df_scatter %<>% distinct(y_id, x_id, Uniprot, nc_beta, target, cancer_abbr, g_adj, Description)
+df_scatter_filter <- df_scatter %>%
+  filter(ProSTEM_tissue != 'Pancancer')
+
+jit_w <- 0.00
+jit_h <- 0.01
+
+scatter.crispr <- ggplot(df_scatter, aes(x = g_adj, y = nc_beta, fill = cancer_abbr)) +
+  facet_wrap(~ Description, scales = "free", ncol = 2) +
+  geom_point(
+    data = df_scatter %>% anti_join(df_scatter_filter),
+    alpha = 0.55, size = 3.5, shape = 21, colour = "grey25", stroke = 0.25,
+    position = position_jitter(width = jit_w, height = jit_h, seed = 42)
+  ) +
+  geom_point(
+    data = df_scatter %>% semi_join(df_scatter_filter),
+    alpha = 0.55, size = 3.5, shape = 21, colour = "grey25", stroke = 0.25,
+    position = position_jitter(width = jit_w, height = jit_h, seed = 42)
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = paste0(x_id, "_", Gene, ".KO")),
+    data = df_scatter_filter,
+    size = 2,
+    position = position_jitter(width = jit_w, height = jit_h, seed = 42),
+    min.segment.length = 0, segment.size = 0.25, segment.color = "grey30",
+    segment.alpha = 0.8, max.overlaps = Inf, show.legend = FALSE
+  ) +
+  geom_hline(yintercept = -0.1,  linetype = "dotted", colour = "grey60") +
+  geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey75") +
+  # Axis labels and titles reflect your definitions
+  labs(
+    x        = "Hedges' g (covariates adjusted)",
+    y        = "Coefficient without transcriptomics covariates\n(nc_beta)",
+    title    = "",
+    subtitle = ""
+  ) +
+  scale_fill_d3() +
+  guides(fill = guide_legend("Cancer", override.aes = list(alpha = 0.55))) +
+  scale_x_continuous(
+    breaks = scales::pretty_breaks(),
+    expand = expansion(mult = 0.02, add = jit_w)
+  ) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(),
+    expand = expansion(mult = 0.02, add = jit_h)
+  ) +
+  coord_cartesian(clip = "on") +  # change to "off" only if labels need to overflow panels
+  theme_bw(base_size = 10)
+
+ggsave('output/Tumor_common_RNA_pathways_ProSTEM_CRISPR_ncbeta_scatters_20251105.pdf', scatter.crispr, width = 8, height = 7)
+
+```
+
+
+#### Drug
+```{r}
+df_scatter1 <- Drug.tissue %>% rename(drug = drug_name)
+df_scatter2 <- Drug %>% semi_join(Drug.tissue %>% distinct(x_id, Uniprot, cancer_abbr)) %>%
+  mutate(ProSTEM_tissue = 'Pancancer')
+df_scatter3 <- Drug %>% semi_join(CRISPR.tissue %>% distinct(x_id, Uniprot, cancer_abbr)) %>%
+  # mutate(Genes = target) %>% # Target should be mapped too, particularly for ppi > 1
+  # separate_rows(Genes, sep = ';') %>% # some target is a gene.list
+  # inner_join(df_dep %>% filter(g_adj > 0) %>% # up-regulate
+  #              distinct(cancer_abbr, Genes, protein) %>%
+  #              rename(Targetted.protein = protein) %>% drop_na()) %>% 
+  mutate(ProSTEM_tissue = 'Pancancer')
+
+tbl.scatter.drug <- df_scatter <- plyr::rbind.fill(df_scatter1, df_scatter2, df_scatter3) %>%
+  filter(nc_beta < 0, g_adj > 0) %>% 
+  inner_join(df_dep %>% distinct(protein, Genes) %>% rename(Uniprot = protein))
+# df_scatter %<>% distinct(y_id, x_id, Uniprot, nc_beta, target, cancer_abbr, g_adj, Description)
+df_scatter_filter <- df_scatter %>%
+  group_by(Description) %>% 
+  arrange(nc_beta) %>% 
+  slice(1:5)
+
+# df_line <- CRISPR.tissue %>% filter(nc_beta < 0)
+df_line <- CRISPR.tissue %>% distinct(Description, Gene, x_id, cancer_abbr, Uniprot, Description, nc_beta) %>%
+  filter(nc_beta < 0) %>% 
+  semi_join(df_scatter %>% select(Uniprot))
+
+
+# Jitter settings (unchanged)
+jit_w <- 0.20
+jit_h <- 0.00
+.scatter.colors <- pal_d3()(length(unique(df_scatter$cancer_abbr))) %>% setNames(unique(df_scatter$cancer_abbr))
+
+# Build one plot per Description (no facets), then patch them together
+.descriptions <- unique(df_scatter$Description)
+
+.plot_list <- lapply(.descriptions, function(.desc) {
+  df_desc  <- df_scatter %>% dplyr::filter(Description == .desc)
+  df_filt  <- df_scatter_filter %>% dplyr::filter(Description == .desc)
+  df_ln <- tryCatch(
+    df_line %>% dplyr::filter(Description == .desc) %>%
+      dplyr::mutate(
+        color = .scatter.colors[cancer_abbr],
+        # x.ln = seq(0.2, by = 0.4, length.out = nrow(df_ln))*(max(df_desc$g_adj) - min(df_desc$g_adj)) + min(df_desc$g_adj),
+        label = str_c(x_id, '_', Gene, '.KO')
+      ) %>% 
+      inner_join(df_desc %>% group_by(cancer_abbr, Uniprot) %>% summarise(g_adj = median(g_adj))),
+    error = function(e) NULL
+  )
+  p <- ggplot(df_desc, aes(x = g_adj, y = nc_beta, fill = cancer_abbr, shape = Genes)) +
+    geom_point(
+      data = df_desc %>% dplyr::anti_join(df_filt),
+      alpha = 0.55, size = 3.5, colour = "grey25", stroke = 0.25,
+      position = position_jitter(width = jit_w, height = jit_h, seed = 42)
+    ) +
+    geom_point(
+      data = df_desc %>% dplyr::semi_join(df_filt),
+      alpha = 0.55, size = 3.5, colour = "grey25", stroke = 0.25,
+      position = position_jitter(width = jit_w, height = jit_h, seed = 42)
+    ) +
+    # Labels for filtered points
+    ggrepel::geom_text_repel(
+      aes(label = paste0(drug)),
+      data = df_filt,
+      size = 2,
+      position = position_jitter(width = jit_w, height = jit_h, seed = 42),
+      min.segment.length = 0, segment.size = 0.25, segment.color = "grey30",
+      segment.alpha = 0.8, max.overlaps = Inf, show.legend = FALSE
+    ) +
+    # geom_hline(yintercept = -0.1,  linetype = "dotted", colour = "grey60") +
+    # geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey75") +
+    labs(
+      x        = "Hedges' g (covariates adjusted)",
+      y        = "Coefficient without transcriptomics covariates\n(nc_beta)",
+      title    = .desc,
+      subtitle = ""
+    ) +
+    scale_shape_manual(values = c(21, 22)) +
+    scale_fill_manual(values = .scatter.colors) +
+    scale_color_manual(values = .scatter.colors) +
+    guides(fill = guide_legend("Cancer", order = 1, override.aes = list(shape = 21, alpha = 0.55, fill = .scatter.colors[unique(df_desc$cancer_abbr)]))) +
+    scale_x_continuous(
+      breaks = scales::pretty_breaks(),
+      expand = expansion(mult = 0.02, add = jit_w)
+    ) +
+    scale_y_continuous(
+      breaks = scales::pretty_breaks(),
+      expand = expansion(mult = 0.02, add = jit_h),
+      limits = c(min(-1e-6, min(df_desc$nc_beta, na.rm = TRUE) - 1e-6), 0)
+    ) +
+    coord_cartesian(clip = "on") +
+    theme_bw(base_size = 10) +
+    theme(title = element_text(size = 5))
+  if(!is.null(df_ln)){
+    p <- p + geom_hline(yintercept = df_ln$nc_beta, color = df_ln$color, linetype = "dashed") +
+      geom_text(aes('text', x = g_adj, y = nc_beta * 1.1, color = cancer_abbr, label = label),
+                size = 2, , show.legend = FALSE,
+                data = df_ln, inherit.aes = FALSE)
+  }
+  return(p)
+})
+
+# Assemble all panels in a grid (4 columns, matching the original facet ncol)
+scatter.drug <- wrap_plots(.plot_list, ncol = 4)
+
+# Render
+ggsave('output/Tumor_common_RNA_pathways_ProSTEM_Drug_ncbeta_scatters_20251106.pdf', scatter.drug, width = 16, height = 6.5)
+
+
+
+
+```
+
+
+### MET+EGFR+BCL2L1 scatters v2
+#### data prepare
+```{r}
+c_adj_tab <- df_dep %>% select(cancer_abbr, protein, g_adj) %>% rename(Uniprot = protein)
+
+df_drug_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All Drug-Protein associations')
+# df_tissue_drug <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level Drug')
+df_crispr_protein <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'All CRISPR-Protein associations')
+# df_tissue_crispr <- readxl::read_excel('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/ProM_resource/mmc6_4tables_overlapped_20251202.xlsx', sheet = 'DeeProM Tissue-level CRISPR')
+
+# for CRISPR
+df_crispr_protein1 <- df_crispr_protein %>%
+  filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta)
+df_crispr_protein2 <- df_crispr_protein1 %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct() # many-to-many
+df_crispr_protein2 %<>% mutate(label = str_c(x_id, cancer_abbr, sep = '_'))
+df_crispr_protein2 %<>% filter(nc_beta < -0.1, g_adj > 0.5)
+
+# for Drug
+df_drug_protein1 <- df_drug_protein %>%
+  filter(ppi == 'T') %>%
+  select(y_id, x_id, Uniprot, beta, nc_beta)
+
+df_drug_protein2 <- df_drug_protein1 %>%
+  inner_join(c_adj_tab, by = 'Uniprot') %>%
+  distinct()
+df_drug_protein2$drug <- str_split(df_drug_protein2$y_id, ';') %>% sapply(function(x) x[2])
+
+# add label
+df_drug_protein2 %<>% mutate(label = str_c(drug, cancer_abbr, sep = '_'))
+df_drug_protein2 %<>% filter(nc_beta < -0.1, g_adj > 0.5)
+
+
+scatter.crispr <- df_crispr_protein2 %>%
+  filter(x_id %in% c('MET', 'EGFR', 'PARP1', 'BCL2L1'))
+scatter.drug <- df_drug_protein2 %>%
+  filter(x_id %in% c('MET', 'EGFR', 'BCL2L1')) %>%
+  left_join(df_dep %>% rename(Uniprot = protein))
+
+
+```
+
+#### version 2
+```{r}
+df_line <- scatter.crispr %>%
+  rename(Gene = y_id) %>% 
+  distinct(Gene, x_id, cancer_abbr, Uniprot, nc_beta) %>%
+  filter(nc_beta < 0) %>% 
+  semi_join(scatter.drug %>% select(Uniprot))
+
+target_list <- c('MET', 'EGFR', 'BCL2L1')
+
+# Jitter settings (unchanged)
+jit_w <- 0.20
+jit_h <- 0.00
+.scatter.colors <- c(pal_npg()(10)[-9], pal_d3()(10)[c(4,5,6)]) %>% setNames(unique(scatter.drug$cancer_abbr))
+
+.plot_list <- lapply(target_list, function(target) {
+  df_scat  <- scatter.drug %>% dplyr::filter(x_id == target)
+  # df_filt  <- scatter.drug_filter %>% dplyr::filter(Description == .desc)
+  df_ln <- tryCatch(
+    df_line %>% dplyr::filter(x_id == target) %>%
+      dplyr::mutate(
+        color = .scatter.colors[cancer_abbr],
+        # x.ln = seq(0.2, by = 0.4, length.out = nrow(df_ln))*(max(df_scat$g_adj) - min(df_scat$g_adj)) + min(df_scat$g_adj),
+        label = str_c(x_id, '_', Gene, '.KO')
+      ) %>% 
+      inner_join(df_scat %>% group_by(cancer_abbr, Uniprot) %>% summarise(g_adj = median(g_adj))),
+    error = function(e) NULL
+  )
+  p <- ggplot(df_scat, aes(x = g_adj, y = nc_beta, fill = cancer_abbr)) +
+    geom_point(
+      shape = 21, alpha = 0.55, size = 3.5, colour = "grey25", stroke = 0.25,
+      position = position_jitter(width = jit_w, height = jit_h, seed = 42)
+    ) +
+    # Labels for filtered points
+    ggrepel::geom_text_repel(
+      aes(x = g_adj, y = nc_beta, label = paste0(drug)),
+      # data = df_scat,
+      size = 2, inherit.aes = FALSE,
+      position = position_jitter(width = jit_w, height = jit_h, seed = 42),
+      min.segment.length = 0, segment.size = 0.25, segment.color = "grey30",
+      segment.alpha = 0.8, max.overlaps = Inf, show.legend = FALSE
+    ) +
+    # geom_hline(yintercept = -0.1,  linetype = "dotted", colour = "grey60") +
+    # geom_vline(xintercept = 0.5, linetype = "dotted", colour = "grey75") +
+    labs(
+      x        = "Hedges' g (covariates adjusted)",
+      y        = "Coefficient without transcriptomics covariates\n(nc_beta)",
+      subtitle = str_c(df_scat$Uniprot, '_', df_scat$Genes)[1]
+    ) +
+    scale_fill_manual(values = .scatter.colors) +
+    # scale_color_manual(values = .scatter.colors) +
+    guides(fill = guide_legend("Cancer", order = 1, override.aes = list(shape = 21, alpha = 0.55, fill = .scatter.colors[unique(df_scat$cancer_abbr)]))) +
+    scale_x_continuous(
+      breaks = scales::pretty_breaks(),
+      expand = expansion(mult = 0.02, add = jit_w)
+    ) +
+    scale_y_continuous(
+      breaks = scales::pretty_breaks(),
+      expand = expansion(mult = 0.02, add = jit_h),
+      limits = c(min(-1e-6, min(df_scat$nc_beta, na.rm = TRUE) - 1e-6), 0)
+    ) +
+    coord_cartesian(clip = "on") +
+    theme_bw(base_size = 10)
+  if(!is.null(df_ln)){
+    # p <- p + geom_hline(yintercept = df_ln$nc_beta, color = df_ln$color, linetype = "dashed") +
+    #   geom_text(aes('text', x = g_adj, y = nc_beta * 1.1, color = cancer_abbr, label = label),
+    #             size = 2, , show.legend = FALSE,
+    #             data = df_ln, inherit.aes = FALSE)
+    p <- p + geom_hline(yintercept = df_ln$nc_beta[1], linetype = "dashed") +
+      geom_text(aes('text', x = g_adj, y = nc_beta * 1.1, label = label),
+                size = 2, show.legend = FALSE,
+                data = df_ln %>% slice(1), inherit.aes = FALSE)
+  }
+  return(p)
+})
+
+# Assemble all panels in a grid (4 columns, matching the original facet ncol)
+scatter.plot.one <- wrap_plots(.plot_list, ncol = 3)
+ggsave('output/Tumor_MET_EGFR_BCL2L1_ProSTEM_Drug_ncbeta_scatters_20251106.pdf', scatter.plot.one, width = 22, height = 6)
+
+# scatter.plot.one <- ggpubr::ggarrange(plotlist = .plot_list, nrow = 1, ncol = 3,
+#                                       common.legend = TRUE, legend = 'none')
+
+
+
+```
+
+
+
+
+#### MET only
+```{r}
+df_bar_MET <- df_bar %>% filter(x_id == 'MET') %>%
+  left_join(df_dep %>% rename(Uniprot = protein))
+
+df_bar_MET1 <- df_bar_MET %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta)
+
+x1 <- min(df_bar_MET1$g_adj)
+x2 <- max(df_bar_MET1$g_adj)
+y1 <- min(df_bar_MET1$nc_beta)
+y2 <- max(df_bar_MET1$nc_beta)
+
+df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pMET <- ggplot(df_bar_tmp %>% filter(x_id == 'MET'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 8, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "MET") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'MET'),
+                  # data = df_bar_MET1,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_MET_20251202.pdf', pMET, width = 9, height = 7)
+
+```
+
+#### EGFR only
+```{r}
+df_bar_EGFR <- df_bar %>% filter(x_id == 'EGFR') %>%
+  left_join(df_dea)
+
+df_bar_EGFR1 <- df_bar_EGFR %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta) %>% filter(g_adj > 0.5)
+
+ggplot(df_bar_EGFR1, aes(x = cancer_abbr, y = drug, size = -log10(p_adj_BH), color = g_adj)) +
+  geom_point(alpha = 1) +
+  scale_color_gradientn(values = seq(0, 2, 0.2),
+                        colors = colorRampPalette(colors = c("#FDAE61", "#F46D43", "#D73027"))(90)) +
+  scale_size(range = c(3, 7), name = "-log10(p_adj_BH)") +
+  labs(
+    x = 'Cancer name',
+    y = 'Drug name'
+  )+
+  #theme_bw()+
+  theme(panel.grid = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.line = element_line(color = 'black'),
+        #axis.line.x = element_blank(),
+        #axis.line.y = element_blank(),
+        plot.subtitle = element_text(size = 30, hjust = 0, color = 'black')
+  )+
+  theme(strip.text.x = element_text(size = 10, colour = "black"),
+        legend.text = element_text(size = 12, color = 'black'), legend.position = 'right',
+        legend.title = element_text(size = 15, color = 'black'))+
+  theme(axis.title.x = element_text(size = 12, hjust = 0.5, color = 'black', angle = 0),
+        axis.text.x = element_text(size = 12, vjust = 0.5 ,color = 'black', angle = 0),
+        # axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+  )+
+  theme(axis.title.y = element_text(size = 12, hjust = 0.5, color = 'black', angle = 90),
+        axis.text.y = element_text(size = 10,color = 'black', angle = 0),
+        axis.ticks.y = element_blank()
+  )
+
+
+x1 <- min(df_bar_EGFR1$g_adj)
+x2 <- max(df_bar_EGFR1$g_adj)
+y1 <- min(df_bar_EGFR1$nc_beta)
+y2 <- max(df_bar_EGFR1$nc_beta)
+
+df_bar_tmp <- df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pEGFR <- ggplot(df_bar_tmp %>% filter(x_id == 'EGFR'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 6, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "EGFR") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'EGFR'),
+                  # data = df_bar_EGFR1,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_EGFR_20251202.pdf', pEGFR, width = 12, height = 9)
+
+```
+
+
+
+
+
+#### BCL2L1 only
+```{r}
+df_bar_BCL2L1 <- df_bar %>% filter(x_id == 'BCL2L1') %>%
+  left_join(df_dea)
+
+df_bar_BCL2L11 <- df_bar_BCL2L1 %>% select(drug, cancer_abbr, g_adj, p_adj_BH, nc_beta) %>% filter(g_adj > 0.5)
+
+ggplot(df_bar_BCL2L11, aes(x = cancer_abbr, y = drug, size = -log10(p_adj_BH), color = g_adj)) +
+  geom_point(alpha = 1) +
+  scale_color_gradientn(values = seq(0, 2, 0.2),
+                        colors = colorRampPalette(colors = c("#FDAE61", "#F46D43", "#D73027"))(90)) +
+  scale_size(range = c(3, 7), name = "-log10(p_adj_BH)") +
+  labs(
+    x = 'Cancer name',
+    y = 'Drug name'
+  )+
+  #theme_bw()+
+  theme(panel.grid = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.line = element_line(color = 'black'),
+        #axis.line.x = element_blank(),
+        #axis.line.y = element_blank(),
+        plot.subtitle = element_text(size = 30, hjust = 0, color = 'black')
+  )+
+  theme(strip.text.x = element_text(size = 10, colour = "black"),
+        legend.text = element_text(size = 12, color = 'black'), legend.position = 'right',
+        legend.title = element_text(size = 15, color = 'black'))+
+  theme(axis.title.x = element_text(size = 12, hjust = 0.5, color = 'black', angle = 0),
+        axis.text.x = element_text(size = 12, vjust = 0.5 ,color = 'black', angle = 0),
+        # axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+  )+
+  theme(axis.title.y = element_text(size = 12, hjust = 0.5, color = 'black', angle = 90),
+        axis.text.y = element_text(size = 10,color = 'black', angle = 0),
+        axis.ticks.y = element_blank()
+  )
+
+
+x1 <- min(df_bar_BCL2L11$g_adj)
+x2 <- max(df_bar_BCL2L11$g_adj)
+y1 <- min(df_bar_BCL2L11$nc_beta)
+y2 <- max(df_bar_BCL2L11$nc_beta)
+
+df_bar_tmp <- df_bar_tmp <- df_bar %>% filter(g_adj >= x1, g_adj <= x2, nc_beta >= y1, nc_beta <= y2)
+pBCL2L1 <- ggplot(df_bar_tmp %>% filter(x_id == 'BCL2L1'), aes(x = g_adj, y = nc_beta, color = x_id)) +
+  geom_point(alpha = 0.8, size = 6, shape = 16) +
+  # geom_vline(xintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_hline(yintercept = 0, lty = 4, col = "black", lwd = 0.8) +
+  # geom_vline(xintercept = -1, lty = 4, col = "gray", lwd = 0.8) +
+  # geom_vline(xintercept = 1, lty = 4, col = "gray", lwd = 0.8) +
+  labs(x = "g_adj", y = "nc_beta", title = "BCL2L1") +
+  scale_colour_manual('Target', values = x_colors[unique(df_bar_tmp$x_id)])+
+  # scale_colour_manual('Target', values = c('#1B9E77', '#BC80BD', '#999999', '#FDCDAC', '#A6761D', '#FF7F00', '#2FBE5C', '#222222', '#E41A1C', '#1F78B4'))+
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 11), axis.title = element_text(size = 13),
+    plot.title = element_text(hjust = 0.5, size = 15, face = "bold"),
+    legend.text = element_text(size = 11), legend.title = element_text(size = 13),
+    plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm")
+  ) +
+  geom_text_repel(aes(x = g_adj, y = nc_beta, label = str_c(drug, cancer_abbr, sep = '_')),
+                  # data = df_drug_protein2 %>% filter(x_id %in% c('MET', 'EGFR')),
+                  data = df_bar_tmp %>% filter(x_id == 'BCL2L1'),
+                  # data = df_bar_BCL2L11,
+                  size = 3, max.overlaps = 40,
+                  min.segment.length = 0,
+                  box.padding = unit(0.6, "lines"), point.padding = unit(0.7, "lines"),
+                  segment.color = "black", show.legend = FALSE
+  )
+#no warning
+ggsave('TPHP_ProSTEM_drug_protein_associations_effect_ncbeta_BCL2L1_20251202.pdf', pBCL2L1, width = 12, height = 9)
+
+```
+
+
+
+

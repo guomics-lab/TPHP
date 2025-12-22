@@ -1,0 +1,613 @@
+---
+title: "TCGA_CPTAC_map"
+author: "JiangWenhao"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+# pacman::p_unload(pacman::p_loaded(), character.only = TRUE)
+# rm(list = ls())
+# gc()
+library(tidyverse)
+library(magrittr)
+# source('//192.168.99.100/share/members/jiangwenhao/code/myQC.R')
+# source('//192.168.99.100/share/members/jiangwenhao/code/my_fun.R')
+
+# setwd('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA')
+```
+
+
+**`uniprot.org` 下载的table使用tsv格式时，不能用Excel编辑，会把诸如SEPT6识别为 Sep. 6**
+
+
+# 1. TCGA data processing
+这个是阿俊的表格，里面是TCGA每个癌症RNA seq数据算出来的T/N之间的fold change的p-value。我们先对这个表格里面代表每个sheet（sheet名为癌症的缩写）和我们的癌症类型（organ）对应（在第一个sheet里面是对应关系），然后将其根据其gene name map梦葛的mapping table里面的uniprot， 再merge到我们对应organ的表格的all sheet种
+```{r}
+df_idmap <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCPA_RNAandCPTAC/TCGA_mapping_uniprotID_list_MGL_20230615.xlsx')
+
+TCGA_tbls <- read_excel_allsheets('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCGA_tpm_DEGs_sumamry202209-median_fromAjun0916_edited.xlsx')
+df_TCGA_lbl <- TCGA_tbls[[1]] %>% rename(TCGA_cancer_name = sheetname) # 提取organ name mapping result
+TCGA_tbls[[1]] <- NULL
+df_TCGA <- plyr::ldply(TCGA_tbls, .id = 'TCGA_cancer_name') # 提取TCGA tables
+df_TCGA1 <- df_TCGA_lbl %>% full_join(df_TCGA) # 合并mapped organ name和TCGA tables
+
+
+
+
+# check gene names
+gene_names <- unique(df_TCGA1$gene_name)
+setdiff(gene_names, df_idmap$`UniProt Gene (recommended)`) # >6000 not matched
+table(df_idmap$`UniProt Gene (recommended)` == df_idmap$`HGNC Gene Symbol (16 May 2022)`)
+# FALSE  TRUE 
+#    22 15290 
+rm(gene_names)
+
+
+
+# 先匹配 gene_name 到 `UniProt Gene (recommended)` ，剩下的根据 ensembl 到 uniprot.org 查询
+df_TCGA2 <- df_TCGA1 %>% full_join(mutate(df_idmap, gene_name = `UniProt Gene (recommended)`), ., 'gene_name')
+df_TCGA2_mapped <- df_TCGA2 %>% filter(!is.na(`UniProt Gene (recommended)`))
+df_TCGA2_unmapped <- df_TCGA2 %>% filter(is.na(`UniProt Gene (recommended)`))
+
+#处理unmapped proteins —— 根据 ensembl 匹配
+ensembls <- unique(df_TCGA2_unmapped$id) # 需要query的ensembls；6512
+writeClipboard(ensembls)
+df_query <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCGA_tpm_ensembl_uniprot-download_true_fields_accession_2Creviewed_2Cid_2Cprotein_nam-2023.06.20-07.32.36.57.xlsx') # 在uniprot.org查询返回结果
+df_query %<>% select(-`UniProt Protein names`)
+df_TCGA2_unmapped %<>%
+  select(-all_of(intersect(colnames(df_query), colnames(.)))) %>% # 只筛选需要的列补充
+  left_join(df_query, by = c('id' = 'Ensembl ID')) %>% # 根据 ensembl 匹配
+  select(all_of(colnames(df_TCGA2_unmapped))) # 列重排，保持一致
+
+#update ensembl mapped result
+df_TCGA2_mapped <- rbind(df_TCGA2_mapped, filter(df_TCGA2_unmapped, !is.na(`UniProt Entry (current)`)))
+df_TCGA2_unmapped %<>% filter(is.na(`UniProt Entry (current)`))
+
+#处理unmapped proteins —— 根据 gene_name 匹配
+gene_names <- unique(df_TCGA2_unmapped$gene_name) # 需要query的gene names；1987
+writeClipboard(gene_names)
+df_query <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCGA_tpm_genename_uniprot-download_true_fields_accession_2Creviewed_2Cid_2Cprotein_nam-2023.06.20-07.35.51.73.xlsx') # 在uniprot.org查询返回结果
+df_query %<>% select(-`UniProt Protein names`)
+df_TCGA2_unmapped %<>%
+  select(-`UniProt Entry (current)`, -`UniProt Entry name`, -`UniProt Gene names`) %>% # 只筛选需要的列补充
+  left_join(df_query, by = 'gene_name') %>% # 根据 ensembl 匹配
+  select(all_of(colnames(df_TCGA2_unmapped))) # 列重排，保持一致
+
+#update ensembl mapped result
+df_TCGA2_mapped <- rbind(df_TCGA2_mapped, filter(df_TCGA2_unmapped, !is.na(`UniProt Entry (current)`)))
+df_TCGA2_unmapped %<>% filter(is.na(`UniProt Entry (current)`))
+dim(df_TCGA2_mapped) # 424820     18
+dim(df_TCGA2_unmapped) # 5269   18
+
+
+
+df_TCGA2_mapped # 这是一个处理完成的table 
+saveRDS(df_TCGA2_mapped, 'df_TCGA2_mapped.rds')
+
+```
+
+
+## map to PUH data
+NaN (both 0)
+Inf (normal = 0)
+-Inf (cancer = 0)
+0 (cancer = normal ≠0)
+```{r}
+df_TCGA2_mapped <- readRDS('df_TCGA2_mapped.rds')
+
+# df_dea <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/diff_expr/20230318_TPHP_dysregulated_proteins_filter50NAByOrgan.xlsx') # PUH DEA analysis data
+# df_dea %<>%
+#   select(organ, protein, log2FC, pAdj_t) %>%
+#   setNames(c('organ', 'protein', 'PUH_gAdj', 'PUH_pAdj'))
+# df_dea[str_detect(df_dea$organ, 'cervix'), 'organ'] <- 'cervix_uteri'
+meta <- rio::import('output/T_NT_info_check.xlsx')
+df_dea <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 3)
+df_dea %<>%
+  select(cancer_abbr, protein, g_adj, p_adj_BH) %>%
+  setNames(c('cancer_abbr', 'protein', 'PUH_gAdj', 'PUH_pAdj')) %>% 
+  inner_join(meta %>% distinct(anatomical_classification, cancer_abbr)) %>% 
+  mutate(organ = case_when(
+    cancer_abbr == "CESC" ~ "cervix_uteri",
+    cancer_abbr == "COCA" ~ "colon",
+    cancer_abbr == "READ" ~ "rectum",
+    T ~ anatomical_classification
+  ))
+setdiff(df_TCGA2_mapped$organ, df_dea$organ) # check organ names; only NA remains
+
+#使用 `UniProt Entry (current)` 匹配
+df_TCGA2_mapped_sep <- df_TCGA2_mapped %>%
+  mutate(`Protein Group` = ifelse(!is.na(`Protein Group`), `Protein Group`, `UniProt Entry (current)`)) %>% 
+  mutate(protein = `Protein Group`) %>%
+  separate_rows(protein, sep = ';')
+
+df_TCGA_PUH <- df_TCGA2_mapped_sep %>%
+  inner_join(df_dea, c('protein' = 'protein', 'organ' = 'organ')) %>% 
+  as.data.frame()
+
+df_TCGA_PUH %<>% mutate_at(vars(log2FC, p_value, adj_p), as.numeric) # character to numeric
+df_TCGA_PUH[is.na(df_TCGA_PUH$log2FC), 'log2FC'] <- 0 # C/N == 0/0 情形，设为 0：无差异
+df_TCGA_PUH %<>% mutate(consistent = sign(log2FC * PUH_gAdj)) # 1：相同，-1：相反，0：其他
+rio::export(df_TCGA_PUH, 'PUH_TCGA_DEA_nofilter_20251202.xlsx')
+
+
+df_TCGA_PUH %>% count(consistent)
+#   consistent     n
+# 1         -1 33010
+# 2          0   276
+# 3          1 51124
+
+df_TCGA_PUH %>% filter(adj_p < 0.05, PUH_pAdj < 0.05) %>% count(consistent)
+#   consistent     n
+# 1         -1 20221
+# 2          0   118
+# 3          1 36359
+
+
+
+
+
+sum(is.na(df_TCGA_PUH$adj_p)) # 0
+sum(is.na(df_TCGA_PUH$PUH_pAdj)) # 0
+df_TCGA_PUH_filterp <- df_TCGA_PUH %>% filter(adj_p < 0.05, PUH_pAdj < 0.05) # PUH adjp filtered
+
+
+
+# 进行consistency评估，1是两个dataset里面显著而且一致上调，-1是两个dataset里面显著而且一致下调，0是其他
+sum(is.na(df_TCGA_PUH_filterp$log2FC)) # 0
+sum(is.na(df_TCGA_PUH_filterp$PUH_gAdj)) # 0
+
+df_TCGA_PUH_filterp$consistency <- 0
+df_TCGA_PUH_filterp[(df_TCGA_PUH_filterp$log2FC > 0) & (df_TCGA_PUH_filterp$PUH_gAdj > 0), 'consistency'] <- 1
+df_TCGA_PUH_filterp[(df_TCGA_PUH_filterp$log2FC < 0) & (df_TCGA_PUH_filterp$PUH_gAdj < 0), 'consistency'] <- -1
+df_TCGA_PUH_filterp %>% count(consistency)
+#   consistency     n
+# 1          -1  9525
+# 2           0 20339
+# 3           1 26834
+df_TCGA_PUH_filterp$consistent <- NULL
+rio::export(df_TCGA_PUH_filterp, 'PUH_TCGA_DEA_filterP_20251202.xlsx')
+
+saveRDS(df_TCGA_PUH, 'df_TCGA_PUH.rds')
+
+```
+
+
+
+# 2. CPTAC
+这个里面是梦葛用CPTAC里面各种癌症的蛋白组数据算出的T/N之间的fold change和p-value。我们先对Proteomics_TvN文件夹里面的每个table（table名为发表文章的作者名）和我们的癌症类型（organ）对应（对应关系见表格TCPA_mapping_summary_list_MGL_20230615_edited），然后将其根据其gene name map梦葛的mapping table里面的uniprot， 再merge到我们对应organ的表格的all sheet中
+```{r}
+df_idmap <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCPA_RNAandCPTAC/TCGA_mapping_uniprotID_list_MGL_20230615.xlsx')
+
+# CPTAC data
+df_CP_lbl <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCPA_RNAandCPTAC/TCPA_mapping_summary_list_MGL_20230615_edit.xlsx')
+df_CP_lbl %<>% filter(`Proteomics` != '-')
+
+CP_tbls <- list.files('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/TCPA_RNAandCPTAC/Proteomics_TvN/', full.names = T) %>% sapply(rio::import)
+names(CP_tbls) <- basename(names(CP_tbls)) %>% str_remove('\\.(xlsx|txt)$') %>% str_remove('_v2') # extract name
+
+#修改source name不匹配的问题
+setdiff(df_CP_lbl$`Proteomics`, names(CP_tbls)) #"Gillette (2020)-LUAD" "Satpathy (2021)-LUSC" "Latonen (2018)" 
+setdiff(names(CP_tbls), df_CP_lbl$`Proteomics`) #"Gillette (2020)"
+names(CP_tbls) %<>% str_replace('Gillette \\(2020\\)', 'Gillette (2020)-LUAD')
+sapply(CP_tbls, names) # check各表列名
+colnames(CP_tbls$`Liu (2021)`)[1] <- colnames(CP_tbls$`McDermott (2020)`)[1] <- colnames(CP_tbls$`Vasaikar (2019)`)[1] <- 'Gene symbol'
+
+CP_tbls$`Hu (2020)`$`P value` <- 10 ^ -(CP_tbls$`Hu (2020)`$`P value`) # 原表经过了-log10变换
+df_CP <- plyr::ldply(CP_tbls, .id = 'Proteomics') # 提取TCGA tables
+df_CP1 <- df_CP_lbl %>% full_join(df_CP) # 合并mapped organ name和TCGA tables
+
+# #处理不正常的symbol （被Excel当做date）
+# Sys.setlocale("LC_TIME", "English") # 设置英文语言
+# df_rescue <- read_excel_allsheets('CPTAC_gene_rescue.xlsx')
+# df_rescue <- df_rescue$Sheet1 %>% filter(n %in% df_rescue$Sheet2$n)
+# df_rescue$n %<>% as.character()
+# df_rescue$MonthDay <- format(as.Date(df_rescue$Date1), format = "%B %d") # format like "March 02"
+# df_rescue %>% semi_join(df_CP1, ., by = c('Gene symbol' = 'n')) %>% select(-organ) %>% rio::export('date-like symbol.xlsx')
+# df_rescue_symbol <- data.frame(MonthDay = unique(sort(df_rescue$MonthDay)),
+#                                symbol = c('')) # 不唯一
+
+
+# 先匹配 gene_name 到 `UniProt Gene (recommended)` ，剩下的根据 symbol 到 uniprot.org 查询
+# df_CP1$`Gene symbol` <- ifelse(!is.na(df_CP1$`Gene symbol`), df_CP1$`Gene symbol`, df_CP1$HGNC) # 使用HGNC填充 # 取消，已在前面修改列名
+
+df_CP2 <- df_CP1 %>% full_join(mutate(df_idmap, `Gene symbol` = `UniProt Gene (recommended)`), ., 'Gene symbol')
+df_CP2$`UniProt ID` <- ifelse(!is.na(df_CP2$`UniProt ID`), df_CP2$`UniProt ID`, df_CP2$`Uniprot ID`) #处理不同tables间的命名差异
+df_CP2$`Uniprot ID` <- NULL
+df_CP2$log2FC <- ifelse(!is.na(df_CP2$log2FC), df_CP2$log2FC, df_CP2$Log2FC) #处理不同tables间的命名差异
+df_CP2$Log2FC <- NULL
+
+# df_CP2 %>% count(`UniProt ID` == `UniProt Entry (current)`)
+# #   `UniProt ID` == `UniProt Entry (current)`     n
+# # 1                                     FALSE     11
+# # 2                                      TRUE   1868
+# # 3                                        NA 115645
+# df_CP2 %>% filter(`UniProt ID` != `UniProt Entry (current)`) %>% select(-(8:12), -(14:22))
+# # df_CP2$`UniProt Entry (current)` <- df_CP2$`UniProt ID` 
+
+df_CP2$`UniProt Entry (current)` <- ifelse(!is.na(df_CP2$`UniProt ID`), df_CP2$`UniProt ID`, df_CP2$`UniProt Entry (current)`) #部分gene name匹配的uniprot与已有的uniprot不符；全部遵循已有的uniprot
+
+
+
+df_CP2_mapped <- df_CP2 %>% filter(!is.na(`UniProt Entry (current)`))
+df_CP2_unmapped <- df_CP2 %>% filter(is.na(`UniProt Entry (current)`))
+
+
+
+
+
+
+#处理unmapped proteins —— 根据 gymbol 匹配
+symbols <- unique(df_CP2_unmapped$`Gene symbol`) # 需要query的symbols；11281
+writeClipboard(symbols)
+df_query <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/TCGA/CPTAC_tpm_symbol_uniprot-download_true_fields_accession_2Creviewed_2Cid_2Cprotein_nam-2023.06.21-13.29.08.25.xlsx') # 在uniprot.org查询返回结果
+df_query %<>% select(-`UniProt Protein names`)
+# df_CP2_unmapped %<>%
+#   select(-all_of(intersect(colnames(df_query), colnames(.)))) %>% # 只筛选需要的列补充
+#   left_join(df_query, by = c('id' = 'Ensembl ID')) %>% # 根据 ensembl 匹配
+#   select(all_of(colnames(df_CP2_unmapped))) # 列重排，保持一致
+
+
+df_CP2_unmapped %<>%
+  select(-`UniProt Entry (current)`, -`UniProt Entry name`, -`UniProt Gene names`) %>% # 只筛选需要的列补充
+  left_join(df_query, by = 'Gene symbol') %>% # 根据 ensembl 匹配
+  select(all_of(colnames(df_CP2_unmapped))) # 列重排，保持一致
+
+
+#update symbol mapped result
+df_CP2_mapped <- rbind(df_CP2_mapped, filter(df_CP2_unmapped, !is.na(`UniProt Entry (current)`)))
+df_CP2_unmapped %<>% filter(is.na(`UniProt Entry (current)`))
+
+
+dim(df_CP2_mapped) # 112720     23
+dim(df_CP2_unmapped) # 4975   23
+unique(df_CP2_unmapped$`Gene symbol`) %>% length() # 4810
+
+
+df_CP2_mapped # 这是一个处理完成的table 
+saveRDS(df_CP2_mapped, 'df_CP2_mapped.rds')
+```
+
+## map to PUH data
+<!-- NaN (both 0) -->
+<!-- Inf (normal = 0) -->
+<!-- -Inf (cancer = 0) -->
+<!-- 0 (cancer = normal ≠0) -->
+```{r}
+df_CP2_mapped <- readRDS('df_CP2_mapped.rds')
+# df_dea <- rio::import('//192.168.99.100/share/members/jiangwenhao/TPHP/20220908/diff_expr/20230318_TPHP_dysregulated_proteins_filter50NAByOrgan.xlsx') # PUH DEA analysis data
+# df_dea %<>%
+#   select(organ, protein, log2FC, pAdj_t) %>%
+#   setNames(c('organ', 'protein', 'PUH_gAdj', 'PUH_pAdj'))
+# df_dea[str_detect(df_dea$organ, 'cervix'), 'organ'] <- 'cervix_uteri'
+meta <- rio::import('output/T_NT_info_check.xlsx')
+df_dea <- rio::import('../6_3paired_tumor_nontumor/output/tumor_nontumor_analysis_reports_v1202.xlsx', sheet = 3)
+df_dea %<>%
+  select(cancer_abbr, protein, g_adj, p_adj_BH) %>%
+  setNames(c('cancer_abbr', 'protein', 'PUH_gAdj', 'PUH_pAdj')) %>% 
+  inner_join(meta %>% distinct(anatomical_classification, cancer_abbr)) %>% 
+  mutate(organ = case_when(
+    cancer_abbr == "CESC" ~ "cervix_uteri",
+    cancer_abbr == "COCA" ~ "colon",
+    cancer_abbr == "READ" ~ "rectum",
+    T ~ anatomical_classification
+  ))
+setdiff(df_CP2_mapped$organ, df_dea$organ) # check organ names; only NA remains
+
+#使用 `UniProt Entry (current)`+`Protein Group` 匹配
+df_CP2_mapped_sep <- df_CP2_mapped %>%
+  mutate(`Protein Group` = ifelse(!is.na(`Protein Group`), `Protein Group`, `UniProt Entry (current)`)) %>% 
+  mutate(protein = `Protein Group`) %>%
+  separate_rows(protein, sep = ';')
+
+df_CP_PUH <- df_CP2_mapped_sep %>%
+  inner_join(df_dea, c('protein' = 'protein', 'organ' = 'organ')) %>% 
+  as.data.frame()
+
+
+
+which(df_CP_PUH$`adj P value` == '<0.01')
+which(df_CP_PUH$`adj P value` == 0.00999999) # integer(0)
+df_CP_PUH[!is.na(df_CP_PUH$`adj P value`) & (df_CP_PUH$`adj P value` == '<0.01'), 'adj P value'] <- 0.00999999 # 设置特殊值
+
+which(df_CP_PUH$log2FC == 1.1111111) # integer(0)
+which(df_CP_PUH$log2FC == -1.1111111) # integer(0)
+which(df_CP_PUH$`adj P value` == 0.049999) # integer(0)
+
+df_CP_PUH[!is.na(df_CP_PUH$`adj P value`) & (df_CP_PUH$`adj P value` == '<0.05'), 'adj P value'] <- 0.049999 # 设置特殊值
+df_CP_PUH %<>% mutate_at(vars(log2FC, `P value`, `adj P value`), as.numeric) # character to numeric
+df_CP_PUH[is.na(df_CP_PUH$log2FC) & !is.na(df_CP_PUH$log1FC) & (df_CP_PUH$log1FC == '>1'), 'log2FC'] <- 1.1111111 # 设置特殊值
+df_CP_PUH[is.na(df_CP_PUH$log2FC) & !is.na(df_CP_PUH$log1FC) & (df_CP_PUH$log1FC == '<-1'), 'log2FC'] <- -1.1111111 # 设置特殊值
+df_CP_PUH[is.na(df_CP_PUH$log2FC), 'log2FC'] <- 0
+# df_CP_PUH %>% count(log1FC)
+#   log1FC     n
+# 1    <-1   322
+# 2     >1   295
+# 3   <NA> 39693
+
+
+
+
+df_CP_PUH %<>% mutate(consistent = sign(log2FC * PUH_gAdj)) # 1：相同，-1：相反，0：其他
+rio::export(df_CP_PUH, 'PUH_CP_DEA_nofilter_20251202.xlsx')
+
+
+df_CP_PUH %>% count(consistent)
+#   consistent     n
+# 1         -1 11518
+# 2          0  1308
+# 3          1 27484
+
+df_CP_PUH %>% filter(`adj P value` < 0.05, PUH_pAdj < 0.05) %>% count(consistent)
+#   consistent     n
+# 1         -1  5743
+# 2          0   372
+# 3          1 20566
+
+
+df_CP_PUH %>% count(`DEPs cut off`)
+#             DEPs cut off     n
+# 1     p < 0.05, FC > 1.5 17848
+# 2 p.adj < 0.05, FC > 1.5   617
+# 3  p.adj < 0.1, FC > 1.5 21808
+# 4         p<0.05; FC>1.5    37
+
+df_CP_PUH1 <- df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p < 0.05, FC > 1.5') & (df_CP_PUH$`P value` < 0.05))
+df_CP_PUH2 <- df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p.adj < 0.05, FC > 1.5') & (df_CP_PUH$`adj P value` < 0.05))
+df_CP_PUH3 <- df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p.adj < 0.1, FC > 1.5') & (df_CP_PUH$`adj P value` < 0.1))
+df_CP_PUH4 <- df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p<0.05; FC>1.5')) # 实际上整个表格只有31 proteins，adjp << 0.05，无需再筛选
+
+
+df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p < 0.05, FC > 1.5')) %>% filter(is.na(`P value`))
+df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p.adj < 0.1, FC > 1.5')) %>% filter(is.na(`adj P value`))
+df_CP_PUH %>% filter((df_CP_PUH$`DEPs cut off` == 'p.adj < 0.1, FC > 1.5')) %>% filter(is.na(`adj P value`)) %>% count(Proteomics) # 经检查，实际为adjp < 0.01，>=0.01均为NA
+
+
+df_CP_PUH_filterp <- rbind(df_CP_PUH1, df_CP_PUH2, df_CP_PUH3, df_CP_PUH4)
+df_CP_PUH_filterp %<>% filter(PUH_pAdj < 0.05) # PUH adjp filtered
+
+
+
+# 进行consistency评估，1是两个dataset里面显著而且一致上调，-1是两个dataset里面显著而且一致下调，0是其他
+sum(is.na(df_CP_PUH_filterp$log2FC)) # 0
+sum(is.na(df_CP_PUH_filterp$PUH_gAdj)) # 0
+
+df_CP_PUH_filterp$consistency <- 0
+df_CP_PUH_filterp[(df_CP_PUH_filterp$log2FC > 0) & (df_CP_PUH_filterp$PUH_gAdj > 0), 'consistency'] <- 1
+df_CP_PUH_filterp[(df_CP_PUH_filterp$log2FC < 0) & (df_CP_PUH_filterp$PUH_gAdj < 0), 'consistency'] <- -1
+df_CP_PUH_filterp %>% count(consistency)
+#   consistency     n
+# 1          -1  9389
+# 2           0  6661
+# 3           1 11842
+df_CP_PUH_filterp$consistent <- NULL
+rio::export(df_CP_PUH_filterp, 'PUH_CP_DEA_filterP_20251202.xlsx')
+
+saveRDS(df_CP_PUH, 'df_CP_PUH.rds')
+
+```
+
+# 3. combine TCGA and CPTAC mapping results
+```{r}
+# df_TCGA_PUH <- readxl::read_excel('PUH_TCGA_DEA_nofilter_20230620.xlsx', col_types = c(rep('text', 15), rep('numeric', 3), rep('text', 1), rep('numeric', 3))) %>% as.data.frame()
+# df_CP_PUH <- readxl::read_excel('PUH_CP_DEA_nofilter_20230620.xlsx', col_types = c(rep('text', 18), rep('numeric', 2), rep('text', 1), rep('numeric', 1), rep('text', 2), rep('numeric', 3))) %>% as.data.frame()
+
+#不能存出xlsx再存入，会有Inf格式问题
+df_TCGA_PUH <- readRDS('df_TCGA_PUH.rds')
+df_CP_PUH <- readRDS('df_CP_PUH.rds')
+
+df_TCGA_PUH$consistent <- df_CP_PUH$consistent <- NULL
+
+
+
+cnames1 <- c(colnames(df_TCGA_PUH)[1:10], 'protein', 'organ', 'PUH_gAdj', 'PUH_pAdj')
+setdiff(colnames(df_TCGA_PUH), cnames1)
+df_TCGA_PUH %<>% rename(
+  TCGA_gene_name = gene_name,
+  TCGA_canceType = canceType,
+  TCGA_id = id,
+  TCGA_p_value = p_value,
+  TCGA_adj_p = adj_p,
+  TCGA_log2FC = log2FC
+) %>% select(all_of(cnames1), everything())
+
+setdiff(colnames(df_CP_PUH), cnames1)
+# [1] "Gene symbol"               "Cancer type"               "Proteomics"               
+# [4] "Proteomics resource"       "RNA"                       "DEPs cut off"             
+# [7] "NB"                        "P value"                   "adj P value"              
+# [10] "log1FC"                    "log2FC"                    "UniProt ID"               
+# [13] "cancer_abbr"               "anatomical_classification" 
+df_CP_PUH %<>% rename(
+  `CPTAC_Gene symbol` = `Gene symbol`,
+  `CPTAC_Cancer type` = `Cancer type`,
+  `CPTAC_Proteomics` = `Proteomics`,
+  `CPTAC_Proteomics resource` = `Proteomics resource`,
+  `CPTAC_RNA` = `RNA`,
+  `CPTAC_DEPs cut off` = `DEPs cut off`,
+  `CPTAC_NB` = `NB`,
+  `CPTAC_P value` = `P value`,
+  `CPTAC_adj P value` = `adj P value`,
+  `CPTAC_log1FC` = `log1FC`,
+  `CPTAC_log2FC` = `log2FC`,
+  `CPTAC_UniProt ID` = `UniProt ID`
+) %>% select(all_of(cnames1), everything())
+
+
+df_comb <- df_TCGA_PUH %>% full_join(df_CP_PUH)
+
+# 进行consistency评估，1是两个dataset里面显著而且一致上调，-1是两个dataset里面显著而且一致下调，0是其他
+df_comb$TCGA_consistency <- 0
+df_comb[which((df_comb$TCGA_log2FC > 0) & (df_comb$PUH_gAdj > 0)), 'TCGA_consistency'] <- 1
+df_comb[which((df_comb$TCGA_log2FC < 0) & (df_comb$PUH_gAdj < 0)), 'TCGA_consistency'] <- -1
+df_comb[is.na(df_comb$TCGA_log2FC), 'TCGA_consistency'] <- NA
+df_comb %>% count(TCGA_consistency )
+#   TCGA_consistency     n
+# 1               -1 15611
+# 2                0 33286
+# 3                1 35513
+# 4               NA 11274
+
+df_comb$CPTAC_consistency <- 0
+df_comb[which((df_comb$CPTAC_log2FC > 0) & (df_comb$PUH_gAdj > 0)), 'CPTAC_consistency'] <- 1
+df_comb[which((df_comb$CPTAC_log2FC < 0) & (df_comb$PUH_gAdj < 0)), 'CPTAC_consistency'] <- -1
+df_comb[is.na(df_comb$CPTAC_log2FC), 'CPTAC_consistency'] <- NA
+df_comb %>% count(CPTAC_consistency)
+#   CPTAC_consistency     n
+# 1                -1 13204
+# 2                 0 13662
+# 3                 1 17512
+# 4                NA 51306
+
+
+# 判断significant
+df_comb$TCGA_significant <- F
+df_comb[which(df_comb$TCGA_adj_p < 0.05 & df_comb$PUH_pAdj < 0.05), 'TCGA_significant'] <- T # PUH adjp filtered
+df_comb[is.na(df_comb$TCGA_id), 'TCGA_significant'] <- NA # 缺失的情况赋值为NA
+
+df_comb$CPTAC_significant <- F
+df_comb[which((df_comb$`CPTAC_DEPs cut off` == 'p < 0.05, FC > 1.5') & (df_comb$`CPTAC_P value` < 0.05) & (df_comb$PUH_pAdj < 0.05)), 'CPTAC_significant'] <- T
+df_comb[which((df_comb$`CPTAC_DEPs cut off` == 'p.adj < 0.05, FC > 1.5') & (df_comb$`CPTAC_adj P value` < 0.05) & (df_comb$PUH_pAdj < 0.05)), 'CPTAC_significant'] <- T
+df_comb[which((df_comb$`CPTAC_DEPs cut off` == 'p.adj < 0.1, FC > 1.5') & (df_comb$`CPTAC_adj P value` < 0.1) & (df_comb$PUH_pAdj < 0.05)), 'CPTAC_significant'] <- T
+df_comb[which((df_comb$`CPTAC_DEPs cut off` == 'p<0.05; FC>1.5') & (df_comb$PUH_pAdj < 0.05)), 'CPTAC_significant'] <- T # 实际上整个表格只有31 proteins，adjp << 0.05，无需再筛选
+df_comb[is.na(df_comb$`CPTAC_Gene symbol`), 'CPTAC_significant'] <- NA # 缺失的情况赋值为NA
+
+df_comb[which(!df_comb$TCGA_significant), 'TCGA_consistency'] <- 0 # p value不显著改为consistency == 0
+df_comb[which(!df_comb$CPTAC_significant), 'CPTAC_consistency'] <- 0 # p value不显著改为consistency == 0
+df_comb %>% count(TCGA_consistency)
+#   TCGA_consistency     n
+# 1               -1  9525
+# 2                0 48051
+# 3                1 26834
+# 4               NA 11274
+
+df_comb %>% count(CPTAC_consistency)
+#   CPTAC_consistency     n
+# 1                -1 10681
+# 2                 0 19750
+# 3                 1 13947
+# 4                NA 51306
+
+
+df_comb$consistency <- ifelse(df_comb$TCGA_consistency * df_comb$CPTAC_consistency == 1, df_comb$TCGA_consistency, 0)
+
+#补充NA的情况，对于其一为±1的情况，赋值为±0.5；使用matrix加速运算
+X <- df_comb %>% select(TCGA_consistency, CPTAC_consistency, consistency) %>% as.matrix()
+y <- apply(X, 1, function(x){
+  if(!is.na(x['consistency'])){
+    ret <- x['consistency'] # 值仍返回值，都为NA的仍返回NA
+  } else{
+    xx <- na.omit(x[c('TCGA_consistency', 'CPTAC_consistency')])
+    if(length(xx) == 0){
+      ret <- 0
+    } else{
+      ret <- xx / 2
+    }
+  }
+  return(ret)
+})
+df_comb$consistency0 <- df_comb$consistency
+df_comb$consistency <- y
+#手动check
+df_comb$consistency0 <- NULL
+df_comb %<>% mutate(TCGA_log2FC = as.numeric(TCGA_log2FC))
+rio::export(df_comb, 'PUH_TCGA_CPTAC_DEA_nofilterP_20251202.xlsx')
+
+df_comb %>% count(consistency)
+#   consistency     n
+# 1        -1.0  3034
+# 2        -0.5  8055
+# 3         0.0 58709
+# 4         0.5 16505
+# 5         1.0  9381
+
+
+
+df_comb_chr <- df_comb %>% mutate_all(as.character)
+rio::export(df_comb_chr, 'PUH_TCGA_CPTAC_DEA_nofilterP_chr_20251202.xlsx')
+```
+
+
+
+
+# 4. TPHP CPTAC TCGA mapping
+## scatters
+```{r}
+res <- readxl::read_xlsx("PUH_TCGA_CPTAC_DEA_nofilterP_chr_20251202.xlsx")
+res %<>% mutate_at(vars(PUH_gAdj, TCGA_log2FC, CPTAC_log2FC), as.numeric)
+df_TCGA <- res %>%
+  filter(!is.na(organ)) %>% 
+  filter((abs(PUH_gAdj) > 0.5) & (abs(TCGA_log2FC) > log2(1.6))) %>% 
+  # filter(abs(TCGA_consistency) == 1) %>% 
+  select(protein, organ, PUH_gAdj, TCGA_log2FC, TCGA_consistency)
+
+df_CPTAC <- res %>% 
+  filter(!is.na(organ)) %>% 
+  filter((abs(PUH_gAdj) > 0.5) & (abs(CPTAC_log2FC) > log2(1.2))) %>%
+  # filter(abs(CPTAC_consistency) == 1) %>% 
+  select(protein, organ, PUH_gAdj, CPTAC_log2FC, CPTAC_consistency)
+
+# organ name to cancer name
+ht_organ2cancer <- c('Glioblastoma', 'Cervical carcinoma', 'Colon carcinoma', 'Esophageal carcinoma', 'Fallopian tube carcinoma', 'Gallbladder carcinoma', 'Renal carcinoma', 'Hepatocellular carcinoma', 'Lung carcinoma', 'Diffused large B-cell carcinoma', 'Breast carcinoma', 'Muscle tumor', 'Ovarian carcinoma', 'Pancreas carcinoma', 'Male genitalia carcinoma', 'Prostate carcinoma', 'Rectum carcinoma', 'Gastrointestinal stromal tumors', 'Gastric carcinoma', 'Testis carcinoma', 'Laryngocarcinoma', 'Thymoma and thymic carcinoma', 'Thyroid carcinoma', 'Laryngocarcinoma', 'Endometrial carcinoma')
+names(ht_organ2cancer) <- c('brain', 'cervix_uteri', 'colon', 'esophagus', 'fallopian tube', 'gall bladder', 'kidney', 'liver', 'lung', 'lymph node', 'mammary gland', 'muscle', 'ovary', 'pancreas', 'penis', 'prostate', 'rectum', 'small intestine', 'stomach', 'testis', 'throat', 'thymus', 'thyroid', 'tongue', 'uterus')
+df_TCGA$organ <- ht_organ2cancer[df_TCGA$organ]
+df_CPTAC$organ <- ht_organ2cancer[df_CPTAC$organ]
+
+
+organs <- sort(unique(c(df_TCGA$organ, df_CPTAC$organ)))
+my_colors <- colorRampPalette(RColorBrewer::brewer.pal(11, 'Spectral'))(length(organs))
+names(my_colors) <- organs
+
+
+# set alpha
+df_TCGA$alpha <- ifelse(df_TCGA$TCGA_consistency != 0, 0.8, 0.2)
+df_CPTAC$alpha <- ifelse(df_CPTAC$CPTAC_consistency != 0, 0.8, 0.2)
+
+p1 <- ggplot(df_TCGA) +
+ aes(x = PUH_gAdj, y = TCGA_log2FC, fill = organ) +
+ geom_point(aes(alpha = alpha), shape = 21, size = 1.6, color = 'black') +
+ scale_fill_manual(values = my_colors) +
+ labs(x = "log2 fold-change (PUH data)", 
+ y = "log2 fold-change (TCGA data)", fill = "Cancer name") +
+ theme_minimal()
+
+p2 <- ggplot(df_CPTAC) +
+  aes(x = PUH_gAdj, y = CPTAC_log2FC, fill = organ, color = 'black') +
+  geom_point(aes(alpha = alpha), shape = 21,  size = 1.6, color = 'black') +
+  scale_fill_manual(values = my_colors) +
+  labs(x = "log2 fold-change (PUH data)", 
+       y = "log2 fold-change (CPTAC data)", fill = "Cancer name") +
+  theme_minimal()
+p <- ggpubr::ggarrange(p1, p2, nrow = 1)
+ggsave('PUH_TCGA_CPTAC_map_scatter_20251202.pdf', p, width = 10, height = 5)
+
+
+# stat
+df_TCGA %>% filter(TCGA_consistency == 1) %>% count(protein) %>% nrow() # 4263
+df_TCGA %>% filter(TCGA_consistency == -1) %>% count(protein) %>% nrow() # 1716
+df_CPTAC %>% filter(CPTAC_consistency == 1) %>% count(protein) %>% nrow() # 3179
+df_CPTAC %>% filter(CPTAC_consistency == -1) %>% count(protein) %>% nrow() # 2546
+
+df_TCGA %>% filter(TCGA_consistency == 1) %>% nrow() # 14998
+df_TCGA %>% filter(TCGA_consistency == -1) %>% nrow() # 6373
+df_CPTAC %>% filter(CPTAC_consistency == 1) %>% nrow() # 10514
+df_CPTAC %>% filter(CPTAC_consistency == -1) %>% nrow() # 8742
+
+df_TCGA %>% count(organ) %>% nrow() # 15
+df_CPTAC %>% count(organ) %>% nrow() # 10
+res %>%
+  filter(!is.na(organ)) %>% 
+  filter((abs(PUH_gAdj) > 0.5) & (abs(TCGA_log2FC) > log2(1.6))) %>% 
+  select(protein, organ, PUH_gAdj, TCGA_log2FC, TCGA_consistency) %>% 
+  count(organ) %>% nrow() # 16
+res %>% 
+  filter(!is.na(organ)) %>% 
+  filter((abs(PUH_gAdj) > 0.5) & (abs(CPTAC_log2FC) > log2(1.2))) %>%
+  select(protein, organ, PUH_gAdj, CPTAC_log2FC, CPTAC_consistency) %>% 
+  count(organ) %>% nrow() # 11
+dim(df_CPTAC)
+
+
+```
+
+
