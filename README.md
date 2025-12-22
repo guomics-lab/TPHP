@@ -1,13 +1,15 @@
 # TPHP
 
-This repository contains the core code for the TPHP project. It performs per-cancer, per-protein tumor–paired non-tumor comparisons using linear mixed-effects regression and exports the results as RDS objects for downstream analysis.
+This repository contains the core analysis code for the TPHP project, which supports large-scale, spatially resolved human proteome profiling. The dataset quantifies >13,000 proteins across 2856 samples spanning 58 major tissue types (251 tissue subtypes) and 25 cancer types using DIA-MS.
+
+The code performs per-cancer, per-protein tumor versus paired non-tumor comparisons using linear mixed-effects regression, enabling systematic analysis of oncogenic proteome changes across tissues. Results are exported as RDS objects for downstream statistical analysis, visualization and integration with the public proteome database.
 
 ## Repository layout
 
-- `tumor_dysregulation_analysis.R` — main analysis script  
-- `data/tumor_compare_data.parquet` — input table (paired tumor/non-tumor)  
-- `output/compare_report_output.rds` — main result object (generated)  
-- `output/package_versions.txt` — R + package versions used (generated)  
+- `tumor_dysregulation_analysis.R` — main analysis script
+- `data/tumor_compare_data.parquet` — input table (paired tumor/non-tumor)
+- `output/compare_report_output.rds` — main result
+- `output/package_versions.txt` — R and package versions used
 
 
 # 1. System requirements
